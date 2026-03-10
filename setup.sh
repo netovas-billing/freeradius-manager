@@ -152,8 +152,7 @@ run_prod() {
         --port 8000 \
         --workers "$workers" \
         --log-level warning \
-        --access-log \
-        --log-config /dev/null 2>&1 | tee -a "$LOG_FILE"
+        --access-log 2>&1 | tee -a "$LOG_FILE"
 }
 
 # ─────────────────────────────────────────────
