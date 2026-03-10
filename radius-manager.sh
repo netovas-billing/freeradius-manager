@@ -61,6 +61,32 @@ check_root() {
 }
 
 # ============================================
+# FUNCTION: Load Instance Info (aman, tanpa source)
+# Menghindari bash mengeksekusi nilai seperti "05:57:50"
+# sebagai command saat CREATED tidak dikuotasi.
+# ============================================
+load_instance_info() {
+    local FILE=$1
+    [ -f "$FILE" ] || return 1
+    while IFS='=' read -r key value; do
+        # Abaikan baris komentar dan baris kosong
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        key="${key// /}"
+        case "$key" in
+            ADMIN_USERNAME) ADMIN_USERNAME="$value" ;;
+            DB_NAME)        DB_NAME="$value"        ;;
+            DB_USER)        DB_USER="$value"        ;;
+            DB_PASS)        DB_PASS="$value"        ;;
+            AUTH_PORT)      AUTH_PORT="$value"      ;;
+            ACCT_PORT)      ACCT_PORT="$value"      ;;
+            COA_PORT)       COA_PORT="$value"       ;;
+            INNER_PORT)     INNER_PORT="$value"     ;;
+        esac
+    done < "$FILE"
+}
+
+# ============================================
 # FUNCTION: MySQL via Unix Socket
 # ============================================
 mysql_cmd() {
@@ -673,10 +699,15 @@ restart_freeradius() {
 delete_config() {
     local A=$1
     info "Removing config: $A"
-    rm -f "$MODS_ENABLED/sql_${A}"         "$MODS_ENABLED/eap_${A}"
-    rm -f "$SITES_ENABLED/${A}"            "$SITES_ENABLED/inner-tunnel-${A}"
-    rm -f "$MODS_AVAILABLE/sql_${A}"       "$MODS_AVAILABLE/eap_${A}"
-    rm -f "$SITES_AVAILABLE/${A}"          "$SITES_AVAILABLE/inner-tunnel-${A}"
+    # Hapus symlink/file enabled
+    rm -f "$MODS_ENABLED/sql_${A}"              "$MODS_ENABLED/eap_${A}"
+    rm -f "$SITES_ENABLED/${A}"                 "$SITES_ENABLED/inner-tunnel-${A}"
+    # Hapus varian lama dengan prefix pppoe_ (backward compat)
+    rm -f "$SITES_ENABLED/pppoe_${A}"           "$SITES_ENABLED/inner-tunnel-${A}"
+    rm -f "$SITES_AVAILABLE/pppoe_${A}"
+    # Hapus file available
+    rm -f "$MODS_AVAILABLE/sql_${A}"            "$MODS_AVAILABLE/eap_${A}"
+    rm -f "$SITES_AVAILABLE/${A}"               "$SITES_AVAILABLE/inner-tunnel-${A}"
     unregister_port "$A"
     success "Config deleted: $A"
 }
@@ -723,9 +754,9 @@ list_instances() {
         [ -f "$INFO_FILE" ] || continue
         found=1
 
-        # Baca variabel dari file info
+        # Baca variabel dari file info (parser aman, tanpa source)
         local ADMIN_USERNAME DB_NAME AUTH_PORT ACCT_PORT COA_PORT
-        source "$INFO_FILE"
+        load_instance_info "$INFO_FILE"
 
         local f="$SITES_AVAILABLE/${ADMIN_USERNAME}"
         local st; [ -L "$SITES_ENABLED/${ADMIN_USERNAME}" ] && \
@@ -841,7 +872,7 @@ AUTH_PORT=${AUTH_PORT}
 ACCT_PORT=${ACCT_PORT}
 COA_PORT=${COA_PORT}
 INNER_PORT=${INNER_PORT}
-CREATED=$(date '+%Y-%m-%d %H:%M:%S')
+CREATED="$(date '+%Y-%m-%d %H:%M:%S')"
 INFOEOF
         chmod 600 "$INFO_FILE"
 
@@ -910,7 +941,7 @@ INFOEOF
 
         if [ "${WITH_DB}" = "--with-db" ]; then
             if [ -f "$INFO_FILE" ]; then
-                source "$INFO_FILE"
+                load_instance_info "$INFO_FILE"
                 test_mariadb || exit 1
                 drop_database "$DB_NAME" "$DB_USER"
             else

@@ -58,6 +58,35 @@ find_python() {
 }
 
 # ─────────────────────────────────────────────
+# Install MariaDB jika belum ada
+# ─────────────────────────────────────────────
+install_mariadb() {
+    if command -v mariadb &>/dev/null || command -v mysql &>/dev/null; then
+        ok "MariaDB sudah terinstall, skip"
+        return 0
+    fi
+    info "MariaDB tidak ditemukan, menginstall via official repo…"
+    curl -LsS https://downloads.mariadb.com/MariaDB/mariadb_repo_setup | bash -s --
+    apt-get install -y -qq mariadb-server mariadb-client
+    systemctl enable --now mariadb
+    ok "MariaDB terinstall dan berjalan"
+}
+
+# ─────────────────────────────────────────────
+# Install FreeRADIUS jika belum ada
+# ─────────────────────────────────────────────
+install_freeradius() {
+    if command -v freeradius &>/dev/null; then
+        ok "FreeRADIUS sudah terinstall, skip"
+        return 0
+    fi
+    info "FreeRADIUS tidak ditemukan, menginstall…"
+    apt-get install -y -qq freeradius freeradius-mysql freeradius-utils
+    systemctl enable --now freeradius.service
+    ok "FreeRADIUS terinstall dan berjalan"
+}
+
+# ─────────────────────────────────────────────
 # Install Python & pip (jika belum ada)
 # ─────────────────────────────────────────────
 install_system_deps() {
@@ -65,15 +94,18 @@ install_system_deps() {
         info "Update apt & install dependensi sistem…"
         apt-get update -qq
         apt-get install -y -qq \
+            curl git \
             python3 python3-venv python3-pip \
             python3-dev build-essential \
             libssl-dev libffi-dev \
             pkg-config \
             default-libmysqlclient-dev
         ok "Dependensi sistem terinstall"
+        install_mariadb
+        install_freeradius
     else
         warn "Bukan root — skip install paket sistem."
-        warn "Pastikan python3-venv sudah terinstall."
+        warn "Pastikan python3-venv, mariadb, freeradius sudah terinstall."
     fi
 }
 
