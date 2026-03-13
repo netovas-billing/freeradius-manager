@@ -22,7 +22,7 @@ FR_USER="freerad"
 FR_GROUP="freerad"
 
 DB_HOST="localhost"
-DB_PORT="53360"
+DB_PORT="3306"  # fallback, akan di-detect otomatis dari MariaDB
 DB_SOCKET="/var/run/mysqld/mysqld.sock"
 
 DB_REMOTE_HOST="%"
@@ -30,8 +30,13 @@ ALLOW_REMOTE_DB=true
 
 PORT_AUTH_START=11000
 PORT_AUTH_STEP=10
+COA_PORT_DEFAULT=3799
 PORT_REGISTRY="$FREERADIUS_DIR/.port_registry"
 FR_SCHEMA="$FREERADIUS_DIR/mods-config/sql/main/mysql/schema.sql"
+
+API_DIR_BASE="/root"
+API_REPO="https://github.com/heirro/freeradius-api"
+PORT_API_START=8100
 
 # ============================================
 # COLORS
@@ -61,6 +66,34 @@ check_root() {
 }
 
 # ============================================
+# FUNCTION: Check & Install Dependencies
+# ============================================
+check_dependencies() {
+    local pkgs=()
+
+    command -v mariadb    &>/dev/null || pkgs+=(mariadb-client)
+    command -v openssl    &>/dev/null || pkgs+=(openssl)
+    command -v ss         &>/dev/null || pkgs+=(iproute2)
+    command -v git        &>/dev/null || pkgs+=(git)
+    command -v python3    &>/dev/null || pkgs+=(python3)
+    python3 -c "import venv" &>/dev/null 2>&1 || pkgs+=(python3-venv)
+    command -v freeradius &>/dev/null || pkgs+=(freeradius)
+    { command -v radtest &>/dev/null && command -v radclient &>/dev/null; } \
+        || pkgs+=(freeradius-utils)
+    [ -f "$FR_SCHEMA" ] || pkgs+=(freeradius-mysql)
+
+    [ ${#pkgs[@]} -eq 0 ] && return 0
+
+    info "Installing missing dependencies: ${pkgs[*]}"
+    if ! apt-get install -y "${pkgs[@]}" >/dev/null 2>&1; then
+        error "Gagal install dependencies: ${pkgs[*]}"
+        error "Coba manual: apt-get install -y ${pkgs[*]}"
+        exit 1
+    fi
+    success "Dependencies ready"
+}
+
+# ============================================
 # FUNCTION: Load Instance Info (aman, tanpa source)
 # Menghindari bash mengeksekusi nilai seperti "05:57:50"
 # sebagai command saat CREATED tidak dikuotasi.
@@ -82,6 +115,7 @@ load_instance_info() {
             ACCT_PORT)      ACCT_PORT="$value"      ;;
             COA_PORT)       COA_PORT="$value"       ;;
             INNER_PORT)     INNER_PORT="$value"     ;;
+            API_PORT)       API_PORT="$value"       ;;
         esac
     done < "$FILE"
 }
@@ -100,6 +134,14 @@ test_mariadb() {
     info "Testing MariaDB connection..."
     if mysql_cmd -e "SELECT 1;" >/dev/null 2>&1; then
         success "MariaDB OK"
+        local detected
+        detected=$(mysql_cmd -se "SHOW VARIABLES LIKE 'port';" 2>/dev/null | awk '{print $2}')
+        if [[ "$detected" =~ ^[0-9]+$ ]] && [ "$detected" -gt 0 ]; then
+            DB_PORT="$detected"
+            success "MariaDB port detected: $DB_PORT"
+        else
+            warning "Tidak bisa deteksi port MariaDB, pakai default: $DB_PORT"
+        fi
         return 0
     else
         error "Tidak bisa konek ke MariaDB!"
@@ -121,22 +163,22 @@ generate_password() {
 # FUNCTION: Auto-Assign Port
 # ============================================
 find_available_port() {
-    local port=$PORT_AUTH_START
+    local port
     touch "$PORT_REGISTRY"
 
     while true; do
+        # Port acak dalam range 10000–59000 (inner = port+5000, max 64000 < 65535)
+        port=$(( RANDOM % 49001 + 10000 ))
         # Cek registry
-        if grep -q "^${port} " "$PORT_REGISTRY" 2>/dev/null; then
-            port=$((port + PORT_AUTH_STEP)); continue
-        fi
+        if grep -q "^${port} " "$PORT_REGISTRY" 2>/dev/null; then continue; fi
         # Cek port auth di sistem
-        if ss -tulnp 2>/dev/null | grep -q ":${port} "; then
-            port=$((port + PORT_AUTH_STEP)); continue
-        fi
+        if ss -tulnp 2>/dev/null | grep -q ":${port} "; then continue; fi
         # Cek port acct (auth+1)
-        if ss -tulnp 2>/dev/null | grep -q ":$((port + 1)) "; then
-            port=$((port + PORT_AUTH_STEP)); continue
-        fi
+        if ss -tulnp 2>/dev/null | grep -q ":$((port + 1)) "; then continue; fi
+        # Cek port coa (auth+2000)
+        if ss -tulnp 2>/dev/null | grep -q ":$((port + 2000)) "; then continue; fi
+        # Cek port inner (auth+5000)
+        if ss -tulnp 2>/dev/null | grep -q ":$((port + 5000)) "; then continue; fi
         echo "$port"
         return 0
     done
@@ -145,15 +187,31 @@ find_available_port() {
 register_port() {
     local port=$1 admin=$2
     touch "$PORT_REGISTRY"
-    echo "${port} # ${admin} auth"           >> "$PORT_REGISTRY"
-    echo "$((port + 1)) # ${admin} acct"     >> "$PORT_REGISTRY"
-    echo "$((port + 2000)) # ${admin} coa"   >> "$PORT_REGISTRY"
-    echo "$((port + 5000)) # ${admin} inner" >> "$PORT_REGISTRY"
+    echo "${port} # ${admin} auth"               >> "$PORT_REGISTRY"
+    echo "$((port + 1)) # ${admin} acct"         >> "$PORT_REGISTRY"
+    echo "$((port + 2000)) # ${admin} coa"       >> "$PORT_REGISTRY"
+    echo "$((port + 5000)) # ${admin} inner"     >> "$PORT_REGISTRY"
 }
 
 unregister_port() {
     local admin=$1
     [ -f "$PORT_REGISTRY" ] && sed -i "/ # ${admin} /d" "$PORT_REGISTRY"
+}
+
+find_available_api_port() {
+    local port=$PORT_API_START
+    touch "$PORT_REGISTRY"
+
+    while true; do
+        if grep -q "^${port} " "$PORT_REGISTRY" 2>/dev/null; then
+            port=$((port + 1)); continue
+        fi
+        if ss -tulnp 2>/dev/null | grep -q ":${port} "; then
+            port=$((port + 1)); continue
+        fi
+        echo "$port"
+        return 0
+    done
 }
 
 # ============================================
@@ -350,7 +408,6 @@ sql ${MODULE_NAME} {
         retry_delay  = 30
         lifetime     = 0
         idle_timeout = 60
-        max_retries  = 5
     }
 
     \$INCLUDE \${modconfdir}/sql/main/\${dialect}/queries.conf
@@ -676,21 +733,34 @@ restart_freeradius() {
         success "Config OK"
     else
         error "Config FAILED!"
-        echo "$TEST_OUTPUT" | grep -iE "error|failed" | head -20
+        echo "$TEST_OUTPUT" | grep -iE "error|failed|unknown|cannot|denied|can't|socket" | head -30
         return 1
     fi
 
     info "Restarting FreeRADIUS..."
     systemctl restart freeradius
-    sleep 2
 
-    if systemctl is-active --quiet freeradius; then
-        success "FreeRADIUS restarted OK"
-    else
-        error "FreeRADIUS gagal start!"
-        journalctl -xeu freeradius.service --no-pager | tail -20
-        return 1
-    fi
+    local i
+    for i in 1 2 3 4 5; do
+        sleep 2
+        if systemctl is-active --quiet freeradius; then
+            success "FreeRADIUS restarted OK"
+            return 0
+        fi
+        [ "$i" -lt 5 ] && info "Waiting for FreeRADIUS... (attempt $i/5)"
+    done
+
+    error "FreeRADIUS gagal start!"
+    echo ""
+    error "--- FreeRADIUS diagnostic (freeradius -X) ---"
+    freeradius -X 2>&1 \
+        | grep -E ".*[Ee]rror.*|.*[Ff]ail.*|.*[Cc]annot.*|.*[Aa]lready.*bind|.*[Pp]ermission.*" \
+        | grep -v "^$" | head -30
+    echo ""
+    error "--- journalctl (app messages only) ---"
+    journalctl -xeu freeradius.service --no-pager -o cat 2>/dev/null \
+        | grep -v "^░" | grep -v "^$" | tail -15
+    return 1
 }
 
 # ============================================
@@ -765,13 +835,16 @@ list_instances() {
             as="${GREEN}LISTEN${NC}" || as="${RED}DOWN${NC}"
         local cs; ss -tulnp 2>/dev/null | grep -q ":${ACCT_PORT} " && \
             cs="${GREEN}LISTEN${NC}" || cs="${RED}DOWN${NC}"
+        local apis; systemctl is-active --quiet "${ADMIN_USERNAME}-api" 2>/dev/null && \
+            apis="${GREEN}RUNNING${NC}" || apis="${RED}STOPPED${NC}"
 
         echo ""
         echo -e "  Instance  : ${BLUE}${ADMIN_USERNAME}${NC}  [${st}]"
         echo    "  Database  : ${DB_NAME}"
         echo -e "  Auth Port : ${AUTH_PORT}  [${as}]"
-        echo -e "  Acct Port : ${ACCT_PORT}  [${cs}]  (auth+1)"
-        echo -e "  CoA  Port : ${COA_PORT}  (auth+2000)"
+        echo -e "  Acct Port : ${ACCT_PORT}  [${cs}]"
+        echo -e "  CoA  Port : ${COA_PORT}  [$(ss -tulnp 2>/dev/null | grep -q ":${COA_PORT} " && echo -e "${GREEN}LISTEN${NC}" || echo -e "${RED}DOWN${NC}")]"
+        echo -e "  API  Port : ${API_PORT:-N/A}  [${apis}]"
     done
 
     [ $found -eq 0 ] && warning "Tidak ada instance"
@@ -785,9 +858,12 @@ list_instances() {
 # ============================================
 test_instance() {
     local A=$1
-    local f="$SITES_AVAILABLE/${A}"
-    [ -f "$f" ] || { error "Instance tidak ditemukan: $A"; return 1; }
-    local ap; ap=$(grep -A3 "type = auth" "$f" | grep "port" | head -1 | awk '{print $3}')
+    [ -f "$SITES_AVAILABLE/${A}" ] || { error "Instance tidak ditemukan: $A"; return 1; }
+    local INFO_FILE="$FREERADIUS_DIR/.instance_${A}"
+    [ -f "$INFO_FILE" ] || { error "Info file tidak ditemukan: $INFO_FILE"; return 1; }
+    local AUTH_PORT
+    load_instance_info "$INFO_FILE"
+    local ap="$AUTH_PORT"
     info "Testing $A — port $ap"
     ss -tulnp 2>/dev/null | grep -q ":${ap} " && \
         success "Port $ap LISTENING" || { error "Port $ap NOT listening!"; return 1; }
@@ -805,18 +881,170 @@ test_instance() {
 # ============================================
 test_disconnect() {
     local A=$1 U=$2 S=$3
-    local f="$SITES_AVAILABLE/${A}"
-    [ -f "$f" ] || { error "Instance tidak ditemukan: $A"; return 1; }
-    local cp; cp=$(grep -A3 "type = coa" "$f" | grep "port" | head -1 | awk '{print $3}')
+    [ -f "$SITES_AVAILABLE/${A}" ] || { error "Instance tidak ditemukan: $A"; return 1; }
+    local INFO_FILE="$FREERADIUS_DIR/.instance_${A}"
+    [ -f "$INFO_FILE" ] || { error "Info file tidak ditemukan: $INFO_FILE"; return 1; }
+    local COA_PORT
+    load_instance_info "$INFO_FILE"
+    local cp="$COA_PORT"
     command -v radclient &>/dev/null || { error "radclient tidak ada"; return 1; }
     printf "User-Name=%s\nAcct-Session-Id=%s\n" "$U" "$S" | \
         radclient "127.0.0.1:${cp}" disconnect testing123
 }
 
 # ============================================
+# FUNCTION: Setup API
+# ============================================
+setup_api() {
+    local A=$1 DB_NAME=$2 DB_USER=$3 DB_PASS=$4 API_PORT=$5
+    local API_DIR="${API_DIR_BASE}/${A}-api"
+    local SERVICE_NAME="${A}-api"
+    local SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+    # Cek sudah ada
+    if [ -d "$API_DIR" ] && [ -f "$SERVICE_FILE" ]; then
+        warning "API '${SERVICE_NAME}' sudah ada, skip"
+        return 0
+    fi
+
+    # Clone repo jika belum ada
+    if [ -d "$API_DIR" ]; then
+        info "Direktori '$API_DIR' sudah ada, skip clone"
+    else
+        info "Cloning API repo ke ${API_DIR}..."
+        git clone --quiet "$API_REPO" "$API_DIR" || {
+            error "Gagal clone repo: $API_REPO"
+            return 1
+        }
+        success "Repo cloned: $API_DIR"
+    fi
+
+    # Buat .env
+    local SWAGGER_PASS
+    SWAGGER_PASS=$(generate_password)
+    info "Membuat .env..."
+    cat > "${API_DIR}/.env" << ENVEOF
+# Application Settings
+APP_NAME=${A}-api
+APP_DEBUG=False
+
+# Swagger/BASIC Auth Credentials
+SWAGGER_USERNAME=admin
+SWAGGER_PASSWORD=${SWAGGER_PASS}
+
+# Database Settings
+DB_TYPE=mariadb
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
+DB_NAME=${DB_NAME}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASS}
+ENVEOF
+    chmod 600 "${API_DIR}/.env"
+    success ".env dibuat"
+
+    # Patch autoclearzombie.sh dengan credentials
+    if [ -f "${API_DIR}/autoclearzombie.sh" ]; then
+        info "Mengisi credentials di autoclearzombie.sh..."
+        sed -i \
+            -e "s|^DB_HOST=.*|DB_HOST=\"${DB_HOST}\"|" \
+            -e "s|^DB_PORT=.*|DB_PORT=\"${DB_PORT}\"|" \
+            -e "s|^DB_USER=.*|DB_USER=\"${DB_USER}\"|" \
+            -e "s|^DB_PASS=.*|DB_PASS=\"${DB_PASS}\"|" \
+            -e "s|^DB_NAME=.*|DB_NAME=\"${DB_NAME}\"|" \
+            "${API_DIR}/autoclearzombie.sh"
+        chmod +x "${API_DIR}/autoclearzombie.sh"
+        success "autoclearzombie.sh dikonfigurasi"
+    fi
+
+    # Setup Python venv
+    info "Setting up Python venv..."
+    python3 -m venv "${API_DIR}/venv" >/dev/null 2>&1 || {
+        error "Gagal buat Python venv!"
+        return 1
+    }
+    "${API_DIR}/venv/bin/pip" install -q -r "${API_DIR}/requirements.txt" || {
+        error "Gagal install requirements.txt!"
+        return 1
+    }
+    success "Python venv ready"
+
+    # Register API port
+    touch "$PORT_REGISTRY"
+    echo "${API_PORT} # ${A} api" >> "$PORT_REGISTRY"
+
+    # Buat systemd service
+    info "Membuat systemd service: ${SERVICE_NAME}..."
+    cat > "$SERVICE_FILE" << SVCEOF
+[Unit]
+Description=RadiusAPI with Uvicorn - ${A}
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=${API_DIR}
+ExecStart=${API_DIR}/venv/bin/uvicorn main:app --host 0.0.0.0 --port ${API_PORT}
+Restart=always
+RestartSec=5
+SyslogIdentifier=${SERVICE_NAME}
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+    systemctl daemon-reload
+    systemctl enable --quiet "${SERVICE_NAME}"
+    systemctl start "${SERVICE_NAME}"
+    sleep 2
+
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        success "API '${SERVICE_NAME}' berjalan di port ${API_PORT}"
+    else
+        error "API service gagal start!"
+        journalctl -xeu "${SERVICE_NAME}.service" --no-pager | tail -10
+        return 1
+    fi
+}
+
+# ============================================
+# FUNCTION: Delete API
+# ============================================
+delete_api() {
+    local A=$1
+    local SERVICE_NAME="${A}-api"
+    local SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+    local API_DIR="${API_DIR_BASE}/${A}-api"
+
+    if [ -f "$SERVICE_FILE" ]; then
+        info "Stopping & removing service: ${SERVICE_NAME}..."
+        systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
+        systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+        rm -f "$SERVICE_FILE"
+        systemctl daemon-reload
+        success "Service '${SERVICE_NAME}' dihapus"
+    else
+        warning "Service '${SERVICE_NAME}' tidak ditemukan, skip"
+    fi
+
+    if [ -d "$API_DIR" ]; then
+        echo ""
+        read -r -p "Hapus direktori API ${API_DIR}? [y/N] " confirm_api
+        echo ""
+        if [[ "${confirm_api}" =~ ^[Yy]$ ]]; then
+            rm -rf "$API_DIR"
+            success "Direktori API dihapus: $API_DIR"
+        else
+            info "Direktori API dibiarkan: $API_DIR"
+        fi
+    fi
+}
+
+# ============================================
 # MAIN
 # ============================================
 check_root
+check_dependencies
 
 case "${1:-}" in
 
@@ -846,6 +1074,7 @@ case "${1:-}" in
         ACCT_PORT=$((AUTH_PORT + 1))
         COA_PORT=$((AUTH_PORT + 2000))
         INNER_PORT=$((AUTH_PORT + 5000))
+        API_PORT=$(find_available_api_port)
 
         echo ""
         header "======================================================"
@@ -855,14 +1084,16 @@ case "${1:-}" in
         echo "  DB User    : $DB_USER"
         echo "  DB Password: $DB_PASS"
         echo "  Auth Port  : $AUTH_PORT"
-        echo "  Acct Port  : $ACCT_PORT   (auth+1)"
-        echo "  CoA  Port  : $COA_PORT    (auth+2000)"
-        echo "  Inner Port : $INNER_PORT  (auth+5000)"
+        echo "  Acct Port  : $ACCT_PORT"
+        echo "  CoA  Port  : $COA_PORT"
+        echo "  Inner Port : $INNER_PORT"
+        echo "  API  Port  : $API_PORT"
         header "======================================================"
         echo ""
 
         # Simpan info instance
         INFO_FILE="$FREERADIUS_DIR/.instance_${ADMIN_USERNAME}"
+        INFO_API_FILE="$API_DIR_BASE/${ADMIN_USERNAME}-api/.env"
         cat > "$INFO_FILE" << INFOEOF
 ADMIN_USERNAME=${ADMIN_USERNAME}
 DB_NAME=${DB_NAME}
@@ -872,6 +1103,10 @@ AUTH_PORT=${AUTH_PORT}
 ACCT_PORT=${ACCT_PORT}
 COA_PORT=${COA_PORT}
 INNER_PORT=${INNER_PORT}
+API_PORT=${API_PORT}
+SWAGGER_USERNAME=admin
+SWAGGER_PASSWORD=$(grep '^SWAGGER_PASSWORD=' "$INFO_API_FILE" | cut -d= -f2)
+WEB_API_URL=http://$(hostname -I | awk '{print $1}'):${API_PORT}/docs
 CREATED="$(date '+%Y-%m-%d %H:%M:%S')"
 INFOEOF
         chmod 600 "$INFO_FILE"
@@ -886,6 +1121,7 @@ INFOEOF
         create_log_dir        "$ADMIN_USERNAME"
         register_port         "$AUTH_PORT" "$ADMIN_USERNAME"
         restart_freeradius
+        setup_api             "$ADMIN_USERNAME" "$DB_NAME" "$DB_USER" "$DB_PASS" "$API_PORT"
 
         echo ""
         header "======================================================"
@@ -896,20 +1132,9 @@ INFOEOF
         echo "  DB Name    : $DB_NAME"
         echo "  DB User    : $DB_USER"
         echo "  DB Pass    : $DB_PASS"
-        echo ""
-        echo "  Tambahkan NAS ke database:"
-        echo "  ----------------------------------------"
-        echo "  mariadb ${DB_NAME}"
-        echo ""
-        echo "  INSERT INTO nas (nasname, shortname, type, secret, server)"
-        echo "  VALUES ("
-        echo "    'IP_MIKROTIK',"
-        echo "    'nama_nas',"
-        echo "    'other',"
-        echo "    'secret_mikrotik',"
-        echo "    '${ADMIN_USERNAME}'"
-        echo "  );"
-        echo "  ----------------------------------------"
+        echo " Swagger User: $(grep '^SWAGGER_USERNAME=' "$INFO_API_FILE" | cut -d= -f2)"
+        echo " Swagger Pass: $(grep '^SWAGGER_PASSWORD=' "$INFO_API_FILE" | cut -d= -f2)"
+        echo "  Web API URL: $API_PORT  → http://$(hostname -I | awk '{print $1}'):${API_PORT}/docs"
         echo ""
         echo "  Info  : $0 info $ADMIN_USERNAME"
         echo "  List  : $0 list"
@@ -952,6 +1177,7 @@ INFOEOF
         fi
 
         delete_config "$ADMIN_USERNAME"
+        delete_api    "$ADMIN_USERNAME"
         rm -f "$INFO_FILE"
 
         LOG_PATH="$LOG_DIR/radacct-${ADMIN_USERNAME}"
@@ -1016,10 +1242,22 @@ INFOEOF
     info)
         [ $# -ge 2 ] || { echo "Usage: $0 info <admin>"; exit 1; }
         INFO_FILE="$FREERADIUS_DIR/.instance_${2}"
+        INFO_API_FILE="$API_DIR_BASE/${2}-api/.env"
         [ -f "$INFO_FILE" ] || { error "Info tidak ditemukan: $2"; exit 1; }
         echo ""
         header "=== Instance: $2 ==="
-        cat "$INFO_FILE"
+        echo ""
+        echo " Auth Port  : $(grep '^AUTH_PORT=' "$INFO_FILE" | cut -d= -f2)"
+        echo " Acct Port  : $(grep '^ACCT_PORT=' "$INFO_FILE" | cut -d= -f2)"
+        echo " CoA  Port  : $(grep '^COA_PORT=' "$INFO_FILE" | cut -d= -f2)"
+        echo " API  Port  : $(grep '^API_PORT=' "$INFO_FILE" | cut -d= -f2)"
+        echo " DB Name    : $(grep '^DB_NAME=' "$INFO_FILE" | cut -d= -f2)"
+        echo " DB User    : $(grep '^DB_USER=' "$INFO_FILE" | cut -d= -f2)"
+        echo " DB Pass    : $(grep '^DB_PASS=' "$INFO_FILE" | cut -d= -f2)"
+        echo " Swagger User: $(grep '^SWAGGER_USERNAME=' "$INFO_API_FILE" | cut -d= -f2)"
+        echo " Swagger Pass: $(grep '^SWAGGER_PASSWORD=' "$INFO_API_FILE" | cut -d= -f2)"
+        echo " API URL    : $(grep '^WEB_API_URL=' "$INFO_FILE" | cut -d= -f2)"
+        #cat "$INFO_FILE"
         echo ""
         ;;
 
@@ -1043,13 +1281,13 @@ INFOEOF
         echo "  info   <admin>                     Detail instance"
         echo ""
         echo "Contoh:"
-        echo "  $0 create replaymedia"
-        echo "  $0 create baimnabil MyPass123"
+        echo "  $0 create radiussite1"
+        echo "  $0 create radiussite2 MyPass123"
         echo "  $0 list"
-        echo "  $0 info replaymedia"
-        echo "  $0 stop replaymedia"
-        echo "  $0 start replaymedia"
-        echo "  $0 delete replaymedia --with-db"
+        echo "  $0 info radiussite1"
+        echo "  $0 stop radiussite1"
+        echo "  $0 start radiussite1"
+        echo "  $0 delete radiussite1 --with-db"
         echo ""
         exit 1
         ;;

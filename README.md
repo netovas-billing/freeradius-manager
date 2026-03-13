@@ -1,250 +1,238 @@
-# RadiusManager API
+# FreeRADIUS Multi-Instance Manager
 
-REST API berbasis **Python FastAPI** untuk manajemen multi-instance **FreeRADIUS** di server Linux Debian 12/13.  
-Setiap instance dibuat secara penuh otomatis: konfigurasi FreeRADIUS, database MariaDB, clone repo API, setup venv, hingga systemd service.
-
----
-
-## Fitur
-
-- Buat & hapus instance FreeRADIUS secara otomatis via endpoint REST
-- Database MariaDB dibuat + schema diimport otomatis per instance
-- Clone [heirro/freeradius-api](https://github.com/heirro/freeradius-api/) per instance dengan nama folder sesuai nama instance
-- Setup Python venv + `pip install` otomatis
-- File `.env` ditulis otomatis dari `.env.example` dengan credentials yang sudah terisi
-- Systemd service `<name>-api.service` dibuat, di-enable, dan distart otomatis
-- Port API dicari otomatis (mulai `9100`), dicek ke sistem agar tidak bentrok
-- CRUD user RADIUS (`radcheck`, `radusergroup`, `radreply`)
-- Statistik sesi aktif dari tabel `radacct`
-- Auth via API Key (`X-API-Key` header)
-
----
-
-## Struktur Project
-
-```
-radiusmanager-api/
-├── api/
-│   ├── __init__.py
-│   ├── config.py          ← Konfigurasi via .env
-│   ├── auth.py            ← API Key authentication
-│   ├── main.py            ← FastAPI app factory
-│   └── routers/
-│       ├── radius.py      ← Manajemen instance FreeRADIUS
-│       └── database.py    ← CRUD user RADIUS & statistik
-├── radius-manager.sh      ← Bash script multi-instance FreeRADIUS
-├── requirements.txt
-├── run.py                 ← Entry point langsung
-├── setup.sh               ← Setup venv + jalankan server
-└── env.example            ← Template konfigurasi
-```
-
----
+Kumpulan script untuk mengelola beberapa instance FreeRADIUS + REST API secara otomatis di satu server.
 
 ## Persyaratan
 
-- Debian 12 / 13 (Bookworm / Trixie)
-- Python 3.11+
-- FreeRADIUS 3.x (`apt install freeradius freeradius-mysql`)
-- MariaDB / MySQL
-- `git` terinstall
+- OS: Ubuntu/Debian
+- Root access
+- Paket berikut (auto-install jika belum ada):
+  - `freeradius`, `freeradius-utils`, `freeradius-mysql`
+  - `mariadb-client`
+  - `python3`, `python3-venv`
+  - `git`, `openssl`, `iproute2`
 
 ---
 
-## Instalasi & Menjalankan
+## radius-manager.sh
 
-### 1. Clone repo ini
+Script utama untuk membuat, mengelola, dan menghapus instance FreeRADIUS beserta database dan REST API-nya.
+
+### Yang dilakukan saat `create`
+
+1. Membuat database & user MariaDB khusus instance
+2. Mengimport schema FreeRADIUS ke database
+3. Membuat SQL module (`sql_<nama>`) dan EAP module (`eap_<nama>`)
+4. Membuat virtual server & inner tunnel dengan port acak yang belum terpakai
+5. Meng-clone repo [freeradius-api](https://github.com/heirro/freeradius-api) ke `/root/<nama>-api/`
+6. Mengisi `.env` API dengan credentials database dan Swagger secara otomatis
+7. Mengisi credentials di `autoclearzombie.sh` secara otomatis
+8. Membuat dan mengaktifkan systemd service untuk REST API
+
+### Port yang di-assign per instance
+
+| Port | Fungsi |
+|------|--------|
+| `AUTH_PORT` | RADIUS Authentication |
+| `AUTH_PORT + 1` | RADIUS Accounting |
+| `AUTH_PORT + 2000` | CoA (Change of Authorization) |
+| `AUTH_PORT + 5000` | Inner Tunnel (EAP) |
+| `API_PORT` | REST API (mulai dari 8100) |
+
+Port dipilih secara acak (range 10000–59000) dan dicek agar tidak bentrok dengan port yang sudah dipakai.
+
+### File info instance
+
+Setiap instance menyimpan info di `/etc/freeradius/3.0/.instance_<nama>`, berisi:
+- Credentials database
+- Port yang digunakan
+- URL API
+
+---
+
+### Perintah
 
 ```bash
-git clone <repo-url> /root/radiusmanager-api
-cd /root/radiusmanager-api
+sudo bash radius-manager.sh <command> [options]
 ```
 
-### 2. Salin dan isi konfigurasi
+#### `create`
 
 ```bash
-cp env.example .env
-nano .env
+sudo bash radius-manager.sh create <nama> [db_pass]
 ```
 
-Minimal isi:
+Membuat instance baru lengkap (FreeRADIUS + database + REST API).
 
-```env
-API_KEY=isi_dengan_string_rahasia_panjang
-DB_ROOT_PASSWORD=password_root_mariadb
-```
-
-Generate API key:
+- `<nama>` — dipakai sebagai nama instance, database, dan user MariaDB
+- `[db_pass]` — opsional, password database (auto-generate jika tidak diisi)
 
 ```bash
-openssl rand -hex 32
+# Contoh
+sudo bash radius-manager.sh create replaymedia
+sudo bash radius-manager.sh create baimnabil MyPass123
 ```
 
-### 3. Jalankan setup (install venv + start dev server)
+#### `delete`
 
 ```bash
-sudo bash setup.sh
+sudo bash radius-manager.sh delete <nama> [--with-db]
 ```
 
-Atau step by step:
+Menghapus config FreeRADIUS dan API service.
+
+- `--with-db` — hapus juga database & user MariaDB (ada konfirmasi)
 
 ```bash
-sudo bash setup.sh install   # install deps Python saja
-bash setup.sh run            # dev server port 8000 (--reload)
-bash setup.sh prod           # production (multi-worker)
-sudo bash setup.sh service   # daftarkan sebagai systemd service
+sudo bash radius-manager.sh delete replaymedia
+sudo bash radius-manager.sh delete replaymedia --with-db
 ```
 
-### 4. Akses API
+#### `start` / `stop`
 
-```
-http://server:8000/docs      ← Swagger UI interaktif
-http://server:8000/redoc     ← ReDoc
+```bash
+sudo bash radius-manager.sh start <nama>
+sudo bash radius-manager.sh stop  <nama>
 ```
 
-Semua request wajib menyertakan header:
+Mengaktifkan atau menonaktifkan instance (tanpa menghapus config).
 
+#### `restart`
+
+```bash
+sudo bash radius-manager.sh restart
 ```
-X-API-Key: <nilai API_KEY di .env>
+
+Restart FreeRADIUS (semua instance aktif ikut restart).
+
+#### `list`
+
+```bash
+sudo bash radius-manager.sh list
+```
+
+Menampilkan semua instance beserta status port dan service API.
+
+#### `info`
+
+```bash
+sudo bash radius-manager.sh info <nama>
+```
+
+Menampilkan detail credentials dan port instance.
+
+#### `test`
+
+```bash
+sudo bash radius-manager.sh test <nama>
+```
+
+Mengecek port dan mengirim Access-Request test ke instance.
+
+#### `test-disconnect`
+
+```bash
+sudo bash radius-manager.sh test-disconnect <nama> <username> <session-id>
+```
+
+Mengirim CoA Disconnect-Request ke instance.
+
+---
+
+### Menambahkan NAS (MikroTik/Router)
+
+NAS didaftarkan langsung ke tabel `nas` di database instance:
+
+```sql
+USE <nama>;
+INSERT INTO nas (nasname, shortname, type, secret, server)
+VALUES ('IP_MIKROTIK', 'nama_nas', 'other', 'secret_radius', '<nama>');
 ```
 
 ---
 
-## Konfigurasi `.env`
+## update-api.sh
 
-| Variabel | Default | Keterangan |
-|---|---|---|
-| `API_KEY` | *(auto-generate)* | API key untuk autentikasi semua request |
-| `HOST` | `0.0.0.0` | Bind address server |
-| `PORT` | `8000` | Port server utama |
-| `DEBUG` | `false` | Mode debug (aktifkan CORS `*`) |
-| `FREERADIUS_DIR` | `/etc/freeradius/3.0` | Direktori konfigurasi FreeRADIUS |
-| `RADIUS_MANAGER_SCRIPT` | `./radius-manager.sh` | Path ke bash script |
-| `DB_HOST` | `localhost` | Host MariaDB |
-| `DB_PORT` | `53360` | Port MariaDB |
-| `DB_ROOT_USER` | `root` | User root MariaDB |
-| `DB_ROOT_PASSWORD` | *(kosong)* | Password root MariaDB |
-| `API_INSTANCES_DIR` | `/root` | Direktori clone repo API per instance |
-| `API_GIT_REPO` | `https://github.com/heirro/freeradius-api/` | Repo yang di-clone per instance |
-| `API_PORT_START` | `9100` | Port awal untuk API instance |
-| `API_PORT_REGISTRY` | `/root/.api_port_registry` | File registry port API |
+Script untuk meng-update semua instance API secara otomatis via `git pull`, cocok dijalankan sebagai cron job.
 
----
+### Yang dilakukan
 
-## Endpoint
+1. Membaca semua instance dari `/etc/freeradius/3.0/.instance_*`
+2. Menjalankan `git pull` di direktori API masing-masing instance
+3. Jika **ada update**:
+   - Re-patch credentials di `autoclearzombie.sh` (agar tidak tertimpa hasil pull)
+   - Restart systemd service instance tersebut
+4. Jika **Already up to date** — skip, service tidak diganggu
 
-### FreeRADIUS — `/api/v1/radius`
+### Setup Cron Job
 
-#### `POST /api/v1/radius/instances`
+```bash
+chmod +x /root/update-api.sh
 
-Buat instance baru secara penuh otomatis. Pipeline yang dijalankan:
-
-1. `radius-manager.sh create <name>` → konfigurasi FreeRADIUS + database MariaDB + import schema
-2. Baca credentials dari `/etc/freeradius/3.0/.instance_<name>`
-3. Cari port kosong mulai `API_PORT_START` (cek `ss -tulnp` + registry)
-4. `git clone https://github.com/heirro/freeradius-api/ /root/<name>-api`
-5. `python3 -m venv /root/<name>-api/venv` + `pip install -r requirements.txt`
-6. Tulis `/root/<name>-api/.env` dari `.env.example` dengan credentials DB yang terisi
-7. Buat `/etc/systemd/system/<name>-api.service`, `enable`, `start`
-
-**Request body:**
-```json
-{
-  "admin_username": "replaymedia"
-}
+# Buka crontab
+crontab -e
 ```
 
-**Response:**
-```json
-{
-  "message": "Instance 'replaymedia' berhasil dibuat.",
-  "name": "replaymedia",
-  "api_port": 9100,
-  "api_dir": "/root/replaymedia-api",
-  "env_file": "/root/replaymedia-api/.env",
-  "service_file": "/etc/systemd/system/replaymedia-api.service",
-  "service_url": "http://<server>:9100",
-  "docs_url": "http://<server>:9100/docs",
-  "credentials": {
-    "db_name": "replaymedia",
-    "db_user": "replaymedia",
-    "db_pass": "...",
-    "auth_port": "11000",
-    "acct_port": "11001",
-    "coa_port": "13000"
-  }
-}
+Tambahkan baris berikut (tiap jam):
+
+```
+0 * * * * /root/update-api.sh >> /var/log/update-api.log 2>&1
 ```
 
-**Systemd service yang dihasilkan** (`/etc/systemd/system/replaymedia-api.service`):
-```ini
-[Unit]
-Description=RadiusAPI with Uvicorn
-After=network.target
+### Melihat Log Update
 
-[Service]
-User=root
-Group=root
-WorkingDirectory=/root/replaymedia-api
-ExecStart=/root/replaymedia-api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 9100
-Restart=always
-RestartSec=5
-SyslogIdentifier=replaymedia-api
+```bash
+tail -f /var/log/update-api.log
+```
 
-[Install]
-WantedBy=multi-user.target
+Contoh output:
+
+```
+[2026-03-13 10:00:01] [INFO]  --- Checking: replaymedia (/root/replaymedia-api) ---
+[2026-03-13 10:00:02] [INFO]  Git pull: Already up to date.
+[2026-03-13 10:00:02] [INFO]  Tidak ada perubahan, skip restart
+[2026-03-13 10:00:03] [INFO]  --- Checking: baimnabil (/root/baimnabil-api) ---
+[2026-03-13 10:00:05] [INFO]  Git pull: Updating a3f1c2d..9b8e4f1
+[2026-03-13 10:00:05] [OK]    autoclearzombie.sh di-patch ulang
+[2026-03-13 10:00:07] [OK]    Service baimnabil-api berhasil di-restart
+[2026-03-13 10:00:07] [INFO]  --- Done ---
 ```
 
 ---
 
-| Method | Endpoint | Deskripsi |
-|---|---|---|
-| `GET` | `/api/v1/radius/instances` | Daftar semua instance |
-| `POST` | `/api/v1/radius/instances` | Buat instance baru (pipeline lengkap) |
-| `DELETE` | `/api/v1/radius/instances/{name}?confirm=true` | Hapus instance + API dir + service |
-| `DELETE` | `/api/v1/radius/instances/{name}?confirm=true&with_db=true` | + hapus database MariaDB |
-| `GET` | `/api/v1/radius/instances/{name}/status` | Status systemd FreeRADIUS instance |
-| `POST` | `/api/v1/radius/instances/{name}/restart` | Restart FreeRADIUS instance |
-| `POST` | `/api/v1/radius/instances/{name}/api/restart` | Restart API service instance |
-| `GET` | `/api/v1/radius/ports` | Registry port FreeRADIUS |
-| `GET` | `/api/v1/radius/api-ports` | Registry port API instances |
+## Struktur File
 
----
-
-### Database — `/api/v1/database`
-
-| Method | Endpoint | Deskripsi |
-|---|---|---|
-| `GET` | `/api/v1/database/list` | Daftar database `radius_*` |
-| `GET` | `/api/v1/database/{db}/tables` | Daftar tabel dalam database |
-| `GET` | `/api/v1/database/{db}/users` | Daftar user RADIUS (`radcheck`) |
-| `POST` | `/api/v1/database/{db}/users` | Tambah user RADIUS |
-| `DELETE` | `/api/v1/database/{db}/users/{username}` | Hapus user RADIUS |
-| `GET` | `/api/v1/database/{db}/stats` | Statistik sesi aktif (`radacct`) |
-
-**Contoh tambah user RADIUS:**
-```json
-POST /api/v1/database/radius_replaymedia/users
-{
-  "username": "pelanggan01",
-  "password": "pass1234",
-  "password_type": "Cleartext-Password",
-  "group": "pppoe-10mbps"
-}
 ```
+/etc/freeradius/3.0/
+├── .instance_<nama>          # Info & credentials setiap instance
+├── .port_registry            # Registry port yang sudah terpakai
+├── mods-available/
+│   ├── sql_<nama>            # SQL module per instance
+│   └── eap_<nama>            # EAP module per instance
+├── mods-enabled/
+│   ├── sql_<nama> -> ...
+│   └── eap_<nama> -> ...
+├── sites-available/
+│   ├── <nama>                # Virtual server per instance
+│   └── inner-tunnel-<nama>
+└── sites-enabled/
+    ├── <nama> -> ...
+    └── inner-tunnel-<nama> -> ...
 
----
+/root/
+├── radius-manager.sh
+├── update-api.sh
+└── <nama>-api/               # Clone repo API per instance
+    ├── .env                  # Credentials (auto-generated, chmod 600)
+    ├── autoclearzombie.sh    # Auto clear zombie sessions (auto-patched)
+    └── venv/
 
-## Keamanan
+/etc/systemd/system/
+└── <nama>-api.service        # Service systemd per instance
 
-- Semua endpoint dilindungi **API Key** via header `X-API-Key`
-- Perbandingan key menggunakan **constant-time comparison** (anti timing attack)
-- Nama instance/database divalidasi ketat dengan regex (hanya `a-z`, `0-9`, `_`)
-- Semua query database menggunakan **parameterized query** (anti SQL injection)
-- CORS hanya aktif ke `*` saat `DEBUG=true`; di production tidak ada origins yang diizinkan kecuali dikonfigurasi manual
+/var/log/freeradius/
+└── radacct-<nama>/           # Log accounting per instance
 
----
-
-## Lisensi
-
-MIT
+/var/log/
+└── update-api.log            # Log git pull & restart otomatis
+```
