@@ -955,6 +955,16 @@ ENVEOF
             "${API_DIR}/autoclearzombie.sh"
         chmod +x "${API_DIR}/autoclearzombie.sh"
         success "autoclearzombie.sh dikonfigurasi"
+
+        # Buat cron job autoclearzombie (tiap 30 menit)
+        local CRON_JOB="*/30 * * * * ${API_DIR}/autoclearzombie.sh >> /var/log/autoclearzombie-${A}.log 2>&1"
+        local CRON_MARKER="autoclearzombie-${A}"
+        if crontab -l 2>/dev/null | grep -qF "$CRON_MARKER"; then
+            warning "Cron autoclearzombie-${A} sudah ada, skip"
+        else
+            ( crontab -l 2>/dev/null; echo "$CRON_JOB" ) | crontab -
+            success "Cron job dibuat: ${CRON_JOB}"
+        fi
     fi
 
     # Setup Python venv
@@ -1025,6 +1035,14 @@ delete_api() {
         success "Service '${SERVICE_NAME}' dihapus"
     else
         warning "Service '${SERVICE_NAME}' tidak ditemukan, skip"
+    fi
+
+    # Hapus cron job autoclearzombie
+    if crontab -l 2>/dev/null | grep -qF "autoclearzombie-${A}"; then
+        crontab -l 2>/dev/null | grep -vF "autoclearzombie-${A}" | crontab -
+        success "Cron job autoclearzombie-${A} dihapus"
+    else
+        info "Cron autoclearzombie-${A} tidak ditemukan, skip"
     fi
 
     if [ -d "$API_DIR" ]; then
