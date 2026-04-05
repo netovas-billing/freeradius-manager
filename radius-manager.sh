@@ -962,7 +962,7 @@ ENVEOF
         success "autoclearzombie.sh dikonfigurasi"
 
         # Buat cron job autoclearzombie (tiap 30 menit)
-        local CRON_JOB="*/30 * * * * ${API_DIR}/autoclearzombie.sh >> /var/log/autoclearzombie-${A}.log 2>&1"
+        local CRON_JOB="*/15 * * * * ${API_DIR}/autoclearzombie.sh >> /var/log/autoclearzombie-${A}.log 2>&1"
         local CRON_MARKER="autoclearzombie-${A}"
         if crontab -l 2>/dev/null | grep -qF "$CRON_MARKER"; then
             warning "Cron autoclearzombie-${A} sudah ada, skip"
