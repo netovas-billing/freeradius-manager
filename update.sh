@@ -55,6 +55,9 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
         continue
     fi
 
+    # Stash local changes (e.g. patched credentials) so pull can proceed
+    git -C "$API_DIR" stash --quiet 2>/dev/null || true
+
     # Git pull
     PULL_OUTPUT=$(git -C "$API_DIR" pull 2>&1)
     PULL_EXIT=$?
@@ -62,6 +65,7 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
     if [ $PULL_EXIT -ne 0 ]; then
         error "Git pull gagal di ${API_DIR}:"
         echo "$PULL_OUTPUT"
+        git -C "$API_DIR" stash pop --quiet 2>/dev/null || true
         continue
     fi
 
