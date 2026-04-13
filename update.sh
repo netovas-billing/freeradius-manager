@@ -10,6 +10,8 @@ S3_REMOTE="ljns3"
 S3_BUCKET="backup-db"
 S3_BACKUP_ROOT="radiusdb"
 
+AUTOCLEARZOMBIE_SCHEDULE="*/5 * * * *"
+
 info()    { echo "${LOG_PREFIX} [INFO]  $*"; }
 success() { echo "${LOG_PREFIX} [OK]    $*"; }
 warning() { echo "${LOG_PREFIX} [WARN]  $*"; }
@@ -22,8 +24,8 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
 
     # Baca ADMIN_USERNAME dari info file
     ADMIN_USERNAME=""
-    DB_HOST="localhost"
-    DB_PORT="3306"
+    DB_HOST=""
+    DB_PORT=""
     DB_USER=""
     DB_PASS=""
     DB_NAME=""
@@ -48,6 +50,15 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
     SERVICE_NAME="${ADMIN_USERNAME}-api"
     found=1
 
+    # Fallback untuk instance lama: baca DB_HOST/DB_PORT dari .env
+    ENV_FILE="${API_DIR}/.env"
+    if [ -f "$ENV_FILE" ]; then
+        [ -z "$DB_HOST" ] && DB_HOST=$(grep '^DB_HOST=' "$ENV_FILE" | cut -d= -f2)
+        [ -z "$DB_PORT" ] && DB_PORT=$(grep '^DB_PORT=' "$ENV_FILE" | cut -d= -f2)
+    fi
+    DB_HOST="${DB_HOST:-localhost}"
+    DB_PORT="${DB_PORT:-3306}"
+
     info "--- Checking: ${ADMIN_USERNAME} (${API_DIR}) ---"
 
     if [ ! -d "${API_DIR}/.git" ]; then
@@ -55,8 +66,13 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
         continue
     fi
 
-    # Stash local changes (e.g. patched credentials) so pull can proceed
+    # Stash local changes (patched credentials) supaya pull tidak konflik.
+    # Catat hash stash supaya bisa dibedakan stash baru vs. stash lama.
+    STASH_BEFORE=$(git -C "$API_DIR" rev-parse -q --verify refs/stash 2>/dev/null || echo "")
     git -C "$API_DIR" stash --quiet 2>/dev/null || true
+    STASH_AFTER=$(git -C "$API_DIR" rev-parse -q --verify refs/stash 2>/dev/null || echo "")
+    STASH_CREATED=false
+    [ -n "$STASH_AFTER" ] && [ "$STASH_BEFORE" != "$STASH_AFTER" ] && STASH_CREATED=true
 
     # Git pull
     PULL_OUTPUT=$(git -C "$API_DIR" pull 2>&1)
@@ -65,9 +81,12 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
     if [ $PULL_EXIT -ne 0 ]; then
         error "Git pull gagal di ${API_DIR}:"
         echo "$PULL_OUTPUT"
-        git -C "$API_DIR" stash pop --quiet 2>/dev/null || true
+        [ "$STASH_CREATED" = true ] && git -C "$API_DIR" stash pop --quiet 2>/dev/null || true
         continue
     fi
+
+    # Pull sukses — credentials akan di-patch ulang, stash tidak dibutuhkan lagi.
+    [ "$STASH_CREATED" = true ] && git -C "$API_DIR" stash drop --quiet 2>/dev/null || true
 
     info "Git pull: ${PULL_OUTPUT}"
 
@@ -83,6 +102,15 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
             "${API_DIR}/autoclearzombie.sh"
         chmod +x "${API_DIR}/autoclearzombie.sh"
         success "autoclearzombie.sh di-patch"
+
+        # Sync cron schedule autoclearzombie
+        CRON_MARKER="autoclearzombie-${ADMIN_USERNAME}"
+        CRON_JOB="${AUTOCLEARZOMBIE_SCHEDULE} ${API_DIR}/autoclearzombie.sh >> /var/log/autoclearzombie-${ADMIN_USERNAME}.log 2>&1"
+        CURRENT_CRON=$(crontab -l 2>/dev/null | grep -F "$CRON_MARKER" || true)
+        if [ "$CURRENT_CRON" != "$CRON_JOB" ]; then
+            ( crontab -l 2>/dev/null | grep -vF "$CRON_MARKER"; echo "$CRON_JOB" ) | crontab -
+            success "Cron autoclearzombie-${ADMIN_USERNAME} di-sync: ${AUTOCLEARZOMBIE_SCHEDULE}"
+        fi
     fi
 
     if [ -f "${API_DIR}/autobackups3.sh" ]; then

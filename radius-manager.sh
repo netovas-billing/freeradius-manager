@@ -961,8 +961,8 @@ ENVEOF
         chmod +x "${API_DIR}/autoclearzombie.sh"
         success "autoclearzombie.sh dikonfigurasi"
 
-        # Buat cron job autoclearzombie (tiap 30 menit)
-        local CRON_JOB="*/15 * * * * ${API_DIR}/autoclearzombie.sh >> /var/log/autoclearzombie-${A}.log 2>&1"
+        # Buat cron job autoclearzombie (tiap 5 menit)
+        local CRON_JOB="*/5 * * * * ${API_DIR}/autoclearzombie.sh >> /var/log/autoclearzombie-${A}.log 2>&1"
         local CRON_MARKER="autoclearzombie-${A}"
         if crontab -l 2>/dev/null | grep -qF "$CRON_MARKER"; then
             warning "Cron autoclearzombie-${A} sudah ada, skip"
@@ -1154,6 +1154,8 @@ case "${1:-}" in
         INFO_API_FILE="$API_DIR_BASE/${ADMIN_USERNAME}-api/.env"
         cat > "$INFO_FILE" << INFOEOF
 ADMIN_USERNAME=${ADMIN_USERNAME}
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
 DB_NAME=${DB_NAME}
 DB_USER=${DB_USER}
 DB_PASS=${DB_PASS}
