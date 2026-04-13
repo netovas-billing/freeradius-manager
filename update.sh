@@ -71,15 +71,9 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
 
     info "Git pull: ${PULL_OUTPUT}"
 
-    # Cek apakah ada perubahan
-    if echo "$PULL_OUTPUT" | grep -q "Already up to date"; then
-        info "Tidak ada perubahan, skip restart"
-        continue
-    fi
-
-    # Ada update — patch autoclearzombie.sh jika ada
+    # Patch credentials selalu dari .instance_* (source of truth)
     if [ -f "${API_DIR}/autoclearzombie.sh" ]; then
-        info "Re-patch credentials autoclearzombie.sh..."
+        info "Patch credentials autoclearzombie.sh..."
         sed -i \
             -e "s|^DB_HOST=.*|DB_HOST=\"${DB_HOST}\"|" \
             -e "s|^DB_PORT=.*|DB_PORT=\"${DB_PORT}\"|" \
@@ -88,12 +82,11 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
             -e "s|^DB_NAME=.*|DB_NAME=\"${DB_NAME}\"|" \
             "${API_DIR}/autoclearzombie.sh"
         chmod +x "${API_DIR}/autoclearzombie.sh"
-        success "autoclearzombie.sh di-patch ulang"
+        success "autoclearzombie.sh di-patch"
     fi
 
-    # Ada update — patch autobackups3.sh jika ada
     if [ -f "${API_DIR}/autobackups3.sh" ]; then
-        info "Re-patch credentials autobackups3.sh..."
+        info "Patch credentials autobackups3.sh..."
         sed -i \
             -e "s|^REMOTE=.*|REMOTE=\"${S3_REMOTE}\"|" \
             -e "s|^BUCKET=.*|BUCKET=\"${S3_BUCKET}\"|" \
@@ -105,7 +98,13 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
             -e "s|^DB_NAME=.*|DB_NAME=\"${DB_NAME}\"|" \
             "${API_DIR}/autobackups3.sh"
         chmod +x "${API_DIR}/autobackups3.sh"
-        success "autobackups3.sh di-patch ulang"
+        success "autobackups3.sh di-patch"
+    fi
+
+    # Cek apakah ada perubahan kode untuk restart
+    if echo "$PULL_OUTPUT" | grep -q "Already up to date"; then
+        info "Tidak ada perubahan kode, skip restart"
+        continue
     fi
 
     # Restart service
