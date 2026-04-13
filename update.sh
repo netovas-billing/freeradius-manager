@@ -11,6 +11,7 @@ S3_BUCKET="backup-db"
 S3_BACKUP_ROOT="radiusdb"
 
 AUTOCLEARZOMBIE_SCHEDULE="*/5 * * * *"
+AUTOBACKUPS3_SCHEDULE="@daily"
 
 info()    { echo "${LOG_PREFIX} [INFO]  $*"; }
 success() { echo "${LOG_PREFIX} [OK]    $*"; }
@@ -127,6 +128,15 @@ for INFO_FILE in "$FREERADIUS_DIR"/.instance_*; do
             "${API_DIR}/autobackups3.sh"
         chmod +x "${API_DIR}/autobackups3.sh"
         success "autobackups3.sh di-patch"
+
+        # Sync cron schedule autobackups3
+        CRON_BACKUP_MARKER="autobackups3-${ADMIN_USERNAME}"
+        CRON_BACKUP_JOB="${AUTOBACKUPS3_SCHEDULE} ${API_DIR}/autobackups3.sh >> /var/log/autobackups3-${ADMIN_USERNAME}.log 2>&1"
+        CURRENT_BACKUP_CRON=$(crontab -l 2>/dev/null | grep -F "$CRON_BACKUP_MARKER" || true)
+        if [ "$CURRENT_BACKUP_CRON" != "$CRON_BACKUP_JOB" ]; then
+            ( crontab -l 2>/dev/null | grep -vF "$CRON_BACKUP_MARKER"; echo "$CRON_BACKUP_JOB" ) | crontab -
+            success "Cron autobackups3-${ADMIN_USERNAME} di-sync: ${AUTOBACKUPS3_SCHEDULE}"
+        fi
     fi
 
     # Cek apakah ada perubahan kode untuk restart

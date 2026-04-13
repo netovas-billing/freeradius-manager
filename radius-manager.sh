@@ -41,7 +41,7 @@ PORT_API_START=8100
 S3_REMOTE="ljns3"
 S3_BUCKET="backup-db"
 S3_BACKUP_ROOT="radiusdb"
-S3_BACKUP_SCHEDULE="0 2 * * *"   # Tiap hari jam 02:00
+S3_BACKUP_SCHEDULE="@daily"   # Tiap hari (tengah malam)
 
 # ============================================
 # COLORS
