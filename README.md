@@ -1,6 +1,36 @@
 # FreeRADIUS Multi-Instance Manager
 
-Kumpulan script untuk mengelola beberapa instance FreeRADIUS + REST API secara otomatis di satu server.
+Kumpulan tooling untuk mengelola beberapa instance FreeRADIUS + REST API secara otomatis di satu server.
+
+Repo ini berisi **dua implementasi yang co-exist**:
+
+| Tool | Bahasa | Untuk apa |
+|------|--------|-----------|
+| `radius-manager.sh` | Bash | Tool manual ops (legacy + tetap dipakai). Berjalan langsung di host RADIUS VM. |
+| `radius-manager-api` | Go (di `cmd/radius-manager-api/`) | HTTP control plane untuk dipanggil ERP/billing system. Mendukung Docker dev stack untuk testing lokal dari Mac/Windows. |
+
+Keduanya **menulis ke state file yang sama** (`.instance_<nama>` + `.port_registry`) dengan `flock(2)`, jadi bisa dipakai bergantian. Lihat:
+
+- [`docs/PRD.md`](docs/PRD.md) — Product Requirements (Billing → freeradius-api integration baseline).
+- [`docs/SRS.md`](docs/SRS.md) — Software Requirements untuk integrasi billing.
+- [`docs/SRS-RadiusManagerAPI.md`](docs/SRS-RadiusManagerAPI.md) — SRS extension untuk Go control plane (v0.2.0).
+- [`cmd/radius-manager-api/README.md`](cmd/radius-manager-api/README.md) — Quick start + Docker dev stack.
+
+## Quick start
+
+```bash
+# Run unit tests (no infra required)
+make test
+
+# Bring up the full Docker stack (rm-api + freeradius + mariadb)
+make docker-up
+
+# End-to-end smoke test (create → verify → delete → audit log check)
+make e2e
+
+# See all targets
+make help
+```
 
 ## Persyaratan
 
