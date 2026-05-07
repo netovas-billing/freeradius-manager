@@ -1,0 +1,96 @@
+# docker-compose.dev.yml
+#
+# Local end-to-end stack for radius-manager-api. Brings up:
+#   - mariadb : MariaDB 10.11 with a dev-grade root password.
+#   - rm-api  : the radius-manager-api binary built from the local source
+#               tree. Inside the container, supervisord (PID 1) runs both
+#               freeradius and rm-api side by side. Per-instance
+#               freeradius-api processes are added at runtime by RM-API
+#               via the SupervisordSystemctl backend.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   sleep 30
+#   TOKEN=$(docker compose -f docker-compose.dev.yml exec -T rm-api cat /etc/radius-manager-api/token)
+#   curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+#        -d '{"name":"demo"}' http://127.0.0.1:9000/v1/instances/
+#   docker compose -f docker-compose.dev.yml down -v
+#
+# This file is dev-only. Production deploys use real systemd via
+# RM_API_SYSTEMD_BACKEND=systemd (the default).
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: rm-api-dev-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: devrootpw
+      # Allow root to connect from any host inside the docker network.
+      MARIADB_ROOT_HOST: "%"
+    ports:
+      # 13307 to avoid colliding with docker-compose.test.yml's 13306.
+      - "127.0.0.1:13307:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    volumes:
+      - mariadb_dev_data:/var/lib/mysql
+
+  rm-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: radius-manager-api:dev
+    container_name: rm-api-dev
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9000:9000"
+      # FreeRADIUS auth/acct, exposed so radclient on the host can probe.
+      - "127.0.0.1:1812:1812/udp"
+      - "127.0.0.1:1813:1813/udp"
+    environment:
+      # rm-api itself
+      RM_API_LISTEN: "0.0.0.0:9000"
+      RM_API_LOG_FORMAT: "text"
+      RM_API_API_PUBLISH_IP: "127.0.0.1"
+      RM_API_SYSTEMD_BACKEND: "supervisord"
+
+      # MariaDB connection (entrypoint composes RM_API_DB_DSN from these).
+      RM_API_DB_HOST: "mariadb"
+      RM_API_DB_PORT: "3306"
+      RM_API_DB_USER: "root"
+      RM_API_DB_PASSWORD: "devrootpw"
+
+      # Per-instance configs need the in-network MariaDB hostname.
+      RM_API_INSTANCE_DB_HOST: "mariadb"
+      RM_API_INSTANCE_DB_PORT: "3306"
+
+      # freeradius-api bootstrap (template-once + copy per instance).
+      RM_API_BOOTSTRAP_REPO: "https://github.com/heirro/freeradius-api"
+      RM_API_BOOTSTRAP_TEMPLATE_DIR: "/var/lib/radius-manager-api/freeradius-api-template"
+    volumes:
+      # Persist token across rebuilds so existing curl scripts keep working.
+      - rm_api_etc:/etc/radius-manager-api
+      # Persist FreeRADIUS dir + state dir for inspection.
+      - rm_api_freeradius:/etc/freeradius/3.0
+      - rm_api_state:/var/lib/radius-manager-api
+      - rm_api_logs:/var/log/radius-manager-api
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/v1/server/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  mariadb_dev_data:
+  rm_api_etc:
+  rm_api_freeradius:
+  rm_api_state:
+  rm_api_logs:

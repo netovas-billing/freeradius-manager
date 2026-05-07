@@ -1,0 +1,42 @@
+# Keep the build context tiny so Docker daemon transfer is fast and
+# layer cache stays reliable. Anything not needed for `go build` or the
+# runtime install steps should be excluded.
+
+# VCS
+.git
+.gitignore
+.github
+
+# Editor / IDE
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts (we run `go build` *inside* the image — don't ship the
+# host's stale binary).
+/radius-manager-api
+/dist
+/bin
+/build
+
+# Test scratch
+/tmp
+*.test
+*.out
+*.coverage
+
+# Documentation (not needed at runtime; bloats build context).
+docs/
+
+# Other compose files (the dev image only needs docker-compose.dev.yml,
+# but we explicitly exclude the test variant from the build context).
+docker-compose.test.yml
+
+# Bash legacy script — runs on the host, not in the container.
+radius-manager.sh
+update.sh
+
+# README is fine to ship for `docker exec rm-api cat /README.md`-style
+# debugging; keep it.
