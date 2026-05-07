@@ -1,0 +1,125 @@
+server {{ .InstanceName }} {
+
+    # ============================================
+    # NAS dibaca dari tabel nas di database
+    # Tambahkan manual:
+    #
+    # USE {{ .InstanceName }};
+    # INSERT INTO nas (nasname, shortname, type, secret, server)
+    # VALUES ('IP_MIKROTIK', 'nama', 'other', 'secret', '{{ .InstanceName }}');
+    # ============================================
+
+    listen {
+        type   = auth
+        ipaddr = *
+        port   = {{ .AuthPort }}
+        limit {
+            max_connections = 16
+            lifetime        = 0
+            idle_timeout    = 30
+        }
+    }
+
+    listen {
+        type   = acct
+        ipaddr = *
+        port   = {{ .AcctPort }}
+        limit {
+            max_connections = 16
+            lifetime        = 0
+            idle_timeout    = 30
+        }
+    }
+
+    listen {
+        type   = coa
+        ipaddr = *
+        port   = {{ .CoAPort }}
+        limit {
+            max_connections = 16
+            lifetime        = 0
+            idle_timeout    = 30
+        }
+    }
+
+    authorize {
+        filter_username
+        preprocess
+        chap
+        mschap
+        digest
+        eap_{{ .InstanceName }} {
+            ok = return
+        }
+        files
+        sql_{{ .InstanceName }}
+        expiration
+        logintime
+        pap
+        Autz-Type New-TLS-Connection {
+            ok
+        }
+    }
+
+    authenticate {
+        Auth-Type PAP {
+            pap
+        }
+        Auth-Type CHAP {
+            chap
+        }
+        Auth-Type MS-CHAP {
+            mschap
+        }
+        mschap
+        digest
+        eap_{{ .InstanceName }}
+    }
+
+    preacct {
+        preprocess
+        acct_unique
+        files
+    }
+
+    accounting {
+        detail
+        sql_{{ .InstanceName }}
+        exec
+        attr_filter.accounting_response
+    }
+
+    session {
+        sql_{{ .InstanceName }}
+    }
+
+    post-auth {
+        if (session-state:User-Name && reply:User-Name && request:User-Name && (reply:User-Name == request:User-Name)) {
+            update reply {
+                &User-Name !* ANY
+            }
+        }
+        update {
+            &reply: += &session-state:
+        }
+        sql_{{ .InstanceName }}
+        exec
+        remove_reply_message_if_eap
+        Post-Auth-Type REJECT {
+            sql_{{ .InstanceName }}
+            attr_filter.access_reject
+            eap_{{ .InstanceName }}
+            remove_reply_message_if_eap
+        }
+        Post-Auth-Type Challenge {
+        }
+    }
+
+    recv-coa {
+        ok
+    }
+
+    send-coa {
+        ok
+    }
+}

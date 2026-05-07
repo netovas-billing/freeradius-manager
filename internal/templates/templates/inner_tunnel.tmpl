@@ -1,0 +1,47 @@
+server inner-tunnel-{{ .InstanceName }} {
+
+    listen {
+        ipaddr = 127.0.0.1
+        port   = {{ .InnerPort }}
+        type   = auth
+    }
+
+    authorize {
+        filter_username
+        chap
+        mschap
+        update control {
+            &Proxy-To-Realm := LOCAL
+        }
+        eap_{{ .InstanceName }} {
+            ok = return
+        }
+        sql_{{ .InstanceName }}
+        pap
+    }
+
+    authenticate {
+        Auth-Type PAP {
+            pap
+        }
+        Auth-Type CHAP {
+            chap
+        }
+        Auth-Type MS-CHAP {
+            mschap
+        }
+        eap_{{ .InstanceName }}
+    }
+
+    session {
+        sql_{{ .InstanceName }}
+    }
+
+    post-auth {
+        sql_{{ .InstanceName }}
+        Post-Auth-Type REJECT {
+            sql_{{ .InstanceName }}
+            attr_filter.access_reject
+        }
+    }
+}

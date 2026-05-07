@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1280, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>RM-API Console</title>
+
+    <!-- Tailwind via Play CDN: ships with JIT, no build step required. -->
+    <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+    <script>
+      // Configure Tailwind before its first paint so our palette is available.
+      tailwind.config = {
+        darkMode: ["class", '[data-theme="dark"]'],
+        theme: {
+          extend: {
+            fontFamily: {
+              mono: [
+                "JetBrains Mono",
+                "ui-monospace",
+                "SFMono-Regular",
+                "Menlo",
+                "Consolas",
+                "monospace",
+              ],
+              sans: [
+                "Inter",
+                "ui-sans-serif",
+                "system-ui",
+                "-apple-system",
+                "Segoe UI",
+                "sans-serif",
+              ],
+            },
+            colors: {
+              // Console palette — flat, low-contrast greys with status accents.
+              ink: {
+                950: "#08090a",
+                900: "#0c0e10",
+                800: "#13161a",
+                700: "#1a1e23",
+                600: "#252a31",
+                500: "#3a4049",
+                400: "#5b626d",
+                300: "#8b929c",
+                200: "#c5c9cf",
+                100: "#e8eaed",
+              },
+              ok: { DEFAULT: "#3ddc84", dim: "#1f7a45" },
+              warn: { DEFAULT: "#e6b450", dim: "#7a5a1f" },
+              bad: { DEFAULT: "#ff5d62", dim: "#7a2329" },
+              accent: { DEFAULT: "#a3e635" },
+            },
+          },
+        },
+      };
+    </script>
+
+    <!-- JetBrains Mono + Inter from Google Fonts. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Lucide icons (load on demand from CDN). -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body class="bg-ink-950 text-ink-100 font-mono text-[13px] leading-5 antialiased">
+    <!-- ============================================================
+         Top bar: brand, server identity, health pill, theme toggle.
+         ============================================================ -->
+    <header
+      class="sticky top-0 z-30 flex items-center justify-between gap-4 border-b border-ink-700 bg-ink-900/95 px-5 py-2 backdrop-blur"
+    >
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <i data-lucide="server" class="h-4 w-4 text-accent"></i>
+          <span class="font-sans font-semibold tracking-tight">RM-API Console</span>
+          <span class="text-ink-400">/</span>
+          <span id="hostname" class="text-ink-300">—</span>
+        </div>
+        <span id="health-pill" class="status-pill status-pill-unknown">
+          <span class="dot"></span>
+          <span class="label">checking</span>
+        </span>
+      </div>
+
+      <div class="flex items-center gap-3 text-ink-300">
+        <span id="version-tag" class="hidden text-ink-400 sm:inline">rm-api —</span>
+        <button
+          id="theme-toggle"
+          title="Toggle theme"
+          class="icon-btn"
+          aria-label="Toggle theme"
+        >
+          <i data-lucide="sun-moon" class="h-4 w-4"></i>
+        </button>
+        <button id="forget-token" title="Forget token" class="icon-btn" aria-label="Forget token">
+          <i data-lucide="key-round" class="h-4 w-4"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- ============================================================
+         Stat strip: 4 boxed metrics. Tabular layout, no charts.
+         ============================================================ -->
+    <section
+      id="stats"
+      class="grid grid-cols-1 gap-px bg-ink-700 border-b border-ink-700 sm:grid-cols-2 lg:grid-cols-4"
+      aria-label="server metrics"
+    >
+      <div class="stat-cell">
+        <div class="stat-label">instances</div>
+        <div class="stat-value" id="stat-instances">—</div>
+        <div class="stat-sub" id="stat-instances-sub">of —</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">capacity</div>
+        <div class="stat-value" id="stat-capacity">—</div>
+        <div class="stat-sub">max instances</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">freeradius</div>
+        <div class="stat-value text-base" id="stat-frr">—</div>
+        <div class="stat-sub">version</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">uptime</div>
+        <div class="stat-value text-base" id="stat-uptime">—</div>
+        <div class="stat-sub" id="stat-uptime-sub">since boot</div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         Main: instances table + side actions.
+         ============================================================ -->
+    <main class="grid grid-cols-1 gap-0 lg:grid-cols-[1fr_320px]">
+      <section class="border-b border-ink-700 lg:border-b-0 lg:border-r">
+        <div class="flex items-center justify-between border-b border-ink-700 px-5 py-2">
+          <div class="flex items-center gap-3">
+            <h2 class="font-sans text-sm font-semibold uppercase tracking-wider text-ink-200">
+              instances
+            </h2>
+            <span id="instances-count" class="text-ink-400">—</span>
+            <span
+              id="instances-refreshing"
+              class="hidden items-center gap-1 text-ink-400"
+              aria-live="polite"
+            >
+              <i data-lucide="refresh-cw" class="h-3 w-3 animate-spin"></i>
+              syncing
+            </span>
+          </div>
+          <div class="flex items-center gap-2">
+            <input
+              id="filter-input"
+              type="search"
+              placeholder="filter…"
+              class="filter-input"
+              aria-label="filter instances"
+            />
+            <button id="refresh-btn" class="btn btn-ghost" title="Refresh">
+              <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>
+              <span>refresh</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="instances-table">
+            <thead>
+              <tr>
+                <th class="w-6"></th>
+                <th>name</th>
+                <th>status</th>
+                <th class="text-right">auth</th>
+                <th class="text-right">acct</th>
+                <th class="text-right">api</th>
+                <th>created</th>
+                <th class="text-right pr-5"></th>
+              </tr>
+            </thead>
+            <tbody id="instances-tbody">
+              <tr class="empty-row">
+                <td colspan="8" class="py-10 text-center text-ink-400">
+                  <i data-lucide="loader" class="mr-1 inline h-3 w-3 animate-spin"></i>
+                  loading instances…
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="px-5 py-4 lg:py-5">
+        <h3 class="font-sans text-sm font-semibold uppercase tracking-wider text-ink-200">
+          new instance
+        </h3>
+        <p class="mt-1 text-xs text-ink-400">
+          Provisions FreeRADIUS site, DB schema, and freeradius-api directory.
+        </p>
+        <form id="create-form" class="mt-3 flex flex-col gap-2" autocomplete="off">
+          <label class="block">
+            <span class="text-xs uppercase tracking-wider text-ink-300">name</span>
+            <input
+              id="create-name"
+              type="text"
+              required
+              minlength="3"
+              maxlength="32"
+              pattern="[a-z0-9_]+"
+              placeholder="mitra_acme"
+              class="text-input mt-1 w-full"
+            />
+            <span class="mt-1 block text-[11px] text-ink-400"
+              >lowercase a–z, 0–9, underscore.</span
+            >
+          </label>
+          <button id="create-submit" type="submit" class="btn btn-primary mt-1 self-start">
+            <i data-lucide="plus" class="h-3.5 w-3.5"></i>
+            <span>create instance</span>
+          </button>
+        </form>
+
+        <div class="mt-6 border-t border-ink-700 pt-4">
+          <h3 class="font-sans text-sm font-semibold uppercase tracking-wider text-ink-200">
+            server
+          </h3>
+          <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt class="text-ink-400">vpn ip</dt>
+            <dd id="info-vpnip" class="break-all">—</dd>
+            <dt class="text-ink-400">mariadb</dt>
+            <dd id="info-mariadb" class="break-all">—</dd>
+            <dt class="text-ink-400">api ver</dt>
+            <dd id="info-rmapi" class="break-all">—</dd>
+          </dl>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ============================================================
+         Footer.
+         ============================================================ -->
+    <footer
+      class="flex items-center justify-between border-t border-ink-700 px-5 py-2 text-xs text-ink-400"
+    >
+      <div class="flex items-center gap-4">
+        <span id="last-sync">never synced</span>
+        <span id="health-detail" class="hidden text-ink-300"></span>
+      </div>
+      <div class="flex items-center gap-4">
+        <a
+          href="../v1/openapi.yaml"
+          class="hover:text-accent"
+          target="_blank"
+          rel="noreferrer"
+          >openapi</a
+        >
+        <a
+          href="https://github.com/heirro/freeradius-manager"
+          class="hover:text-accent"
+          target="_blank"
+          rel="noreferrer"
+          >github</a
+        >
+      </div>
+    </footer>
+
+    <!-- ============================================================
+         Token modal (first-load gate).
+         ============================================================ -->
+    <div id="token-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal w-full max-w-md">
+        <div class="modal-header">
+          <i data-lucide="key-round" class="h-4 w-4 text-accent"></i>
+          <h3 class="modal-title">paste API token</h3>
+        </div>
+        <div class="modal-body">
+          <p class="text-xs text-ink-300">
+            Stored in <code class="bg-ink-700 px-1">localStorage</code> on this device only.
+            Never sent anywhere except this RM-API instance.
+          </p>
+          <form id="token-form" class="mt-3 flex flex-col gap-2">
+            <input
+              id="token-input"
+              type="password"
+              autocomplete="off"
+              autofocus
+              required
+              minlength="8"
+              placeholder="64-hex-char token from `radius-manager-api init`"
+              class="text-input w-full"
+            />
+            <div class="flex items-center justify-between">
+              <label class="flex items-center gap-2 text-xs text-ink-300">
+                <input id="token-show" type="checkbox" class="accent-accent" />
+                show
+              </label>
+              <button type="submit" class="btn btn-primary">
+                <i data-lucide="log-in" class="h-3.5 w-3.5"></i>
+                <span>connect</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================
+         Detail drawer (instance view).
+         ============================================================ -->
+    <div id="detail-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="drawer">
+        <div class="drawer-header">
+          <div class="flex items-center gap-2">
+            <i data-lucide="database" class="h-4 w-4 text-accent"></i>
+            <h3 id="detail-title" class="font-sans text-base font-semibold">instance</h3>
+            <span id="detail-status-pill" class="status-pill status-pill-unknown">
+              <span class="dot"></span><span class="label">—</span>
+            </span>
+          </div>
+          <button id="detail-close" class="icon-btn" aria-label="Close">
+            <i data-lucide="x" class="h-4 w-4"></i>
+          </button>
+        </div>
+        <div class="drawer-body" id="detail-body">
+          <div class="py-8 text-center text-ink-400">
+            <i data-lucide="loader" class="inline h-3 w-3 animate-spin"></i>
+            loading…
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================
+         Confirm modal (destructive).
+         ============================================================ -->
+    <div id="confirm-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal w-full max-w-md">
+        <div class="modal-header">
+          <i data-lucide="triangle-alert" class="h-4 w-4 text-bad"></i>
+          <h3 class="modal-title">confirm destructive action</h3>
+        </div>
+        <div class="modal-body">
+          <p id="confirm-text" class="text-sm text-ink-200">are you sure?</p>
+          <label class="mt-3 flex items-center gap-2 text-xs text-ink-300">
+            <input
+              id="confirm-with-db"
+              type="checkbox"
+              checked
+              class="accent-bad"
+            />
+            also drop the MariaDB database for this instance
+          </label>
+          <div class="mt-3 flex items-center justify-end gap-2">
+            <button id="confirm-cancel" class="btn btn-ghost">cancel</button>
+            <button id="confirm-ok" class="btn btn-danger">
+              <i data-lucide="trash-2" class="h-3.5 w-3.5"></i>
+              <span>delete</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toasts -->
+    <div id="toasts" class="toast-stack" aria-live="polite"></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

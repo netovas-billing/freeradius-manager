@@ -1,0 +1,37 @@
+# Docker Compose for local development testing.
+#
+# Spin up:
+#   docker-compose -f docker-compose.test.yml up -d
+#
+# Connect for interactive debugging:
+#   mysql -h 127.0.0.1 -P 13306 -u root -ptestrootpw
+#
+# Tear down (and wipe volume):
+#   docker-compose -f docker-compose.test.yml down -v
+#
+# This is meant for hand-testing and integration tests run with
+# `go test -tags=integration ./...` (which can either use this
+# pre-running instance via env vars, or spawn its own container
+# via testcontainers-go).
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: rm-api-mariadb-test
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: testrootpw
+      MARIADB_DATABASE: testdb
+    ports:
+      # Use 13306 so it doesn't conflict with a host-installed MariaDB on 3306.
+      - "127.0.0.1:13306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - mariadb_test_data:/var/lib/mysql
+
+volumes:
+  mariadb_test_data:

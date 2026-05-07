@@ -1,0 +1,29 @@
+[Unit]
+Description=Radius Manager API (Control Plane for FreeRADIUS instances)
+Documentation=https://github.com/heirro/freeradius-manager/blob/master/docs/SRS-RadiusManagerAPI.md
+After=network-online.target mariadb.service freeradius.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/radius-manager-api serve
+Restart=on-failure
+RestartSec=5s
+
+# Bind only to the VPN private interface; override per-host as needed.
+Environment="RM_API_LISTEN=127.0.0.1:9000"
+Environment="RM_API_TOKEN_FILE=/etc/radius-manager-api/token"
+Environment="RM_API_FREERADIUS_DIR=/etc/freeradius/3.0"
+Environment="RM_API_STATE_DIR=/var/lib/radius-manager-api"
+Environment="RM_API_CAPACITY_MAX=50"
+Environment="RM_API_LOG_FORMAT=json"
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

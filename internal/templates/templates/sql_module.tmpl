@@ -1,0 +1,48 @@
+sql sql_{{ .InstanceName }} {
+    dialect = "mysql"
+    driver  = "rlm_sql_${dialect}"
+
+    mysql {
+        warnings = auto
+    }
+
+    server    = "{{ .DBHost }}"
+    port      = {{ .DBPort }}
+    login     = "{{ .DBUser }}"
+    password  = "{{ .DBPass }}"
+    radius_db = "{{ .DBName }}"
+
+    sql_user_name = "%{User-Name}"
+
+    acct_table1      = "radacct"
+    acct_table2      = "radacct"
+    postauth_table   = "radpostauth"
+    authcheck_table  = "radcheck"
+    groupcheck_table = "radgroupcheck"
+    authreply_table  = "radreply"
+    groupreply_table = "radgroupreply"
+    usergroup_table  = "radusergroup"
+
+    read_clients          = yes
+    client_table          = "nas"
+    read_groups           = yes
+    read_profiles         = yes
+    delete_stale_sessions = yes
+
+    group_attribute = "sql_{{ .InstanceName }}-SQL-Group"
+
+    safe_characters = "@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_: /"
+
+    pool {
+        start        = 3
+        min          = 2
+        max          = 10
+        spare        = 3
+        uses         = 0
+        retry_delay  = 30
+        lifetime     = 0
+        idle_timeout = 60
+    }
+
+    $INCLUDE ${modconfdir}/sql/main/${dialect}/queries.conf
+}

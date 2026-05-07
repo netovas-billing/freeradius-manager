@@ -1,0 +1,298 @@
+openapi: 3.0.3
+info:
+  title: Radius Manager API
+  description: |
+    HTTP control plane for FreeRADIUS instance lifecycle on a single
+    RADIUS Server VM. See docs/SRS-RadiusManagerAPI.md for the full
+    specification.
+  version: "0.1.0"
+  contact:
+    name: Tim Network Operations
+
+servers:
+  - url: http://{host}:{port}
+    description: Per-VM endpoint (typically reached via VPN private IP)
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "9000"
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    Ports:
+      type: object
+      properties:
+        auth:  { type: integer, example: 18234 }
+        acct:  { type: integer, example: 18235 }
+        coa:   { type: integer, example: 20234 }
+        inner: { type: integer, example: 23234 }
+        api:   { type: integer, example: 8112 }
+
+    Database:
+      type: object
+      properties:
+        host: { type: string, example: localhost }
+        port: { type: integer, example: 3306 }
+        name: { type: string, example: mitra_x }
+        user: { type: string, example: mitra_x }
+        password: { type: string, description: "Only present when ?include_secrets=true" }
+        password_known: { type: boolean }
+
+    Credentials:
+      type: object
+      properties:
+        username: { type: string, example: admin }
+        password: { type: string, description: "Only present when ?include_secrets=true" }
+        password_known: { type: boolean }
+
+    Instance:
+      type: object
+      properties:
+        name:    { type: string, example: mitra_x }
+        status:  { type: string, enum: [running, stopped, error, unknown] }
+        enabled: { type: boolean }
+        ports:   { $ref: "#/components/schemas/Ports" }
+        database: { $ref: "#/components/schemas/Database" }
+        swagger:  { $ref: "#/components/schemas/Credentials" }
+        api_url:  { type: string, example: "http://10.254.252.2:8112" }
+        created_at: { type: string, format: date-time }
+
+    CreateInstanceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z0-9_]{1,32}$"
+          example: mitra_x
+        db_password:
+          type: string
+          nullable: true
+          description: "Optional. Auto-generated if omitted."
+        with_db:
+          type: boolean
+          default: true
+
+    CreateInstanceResponse:
+      allOf:
+        - $ref: "#/components/schemas/Instance"
+        - type: object
+          properties:
+            swagger_url: { type: string }
+
+    DeleteInstanceResponse:
+      type: object
+      properties:
+        name: { type: string }
+        deleted_at: { type: string, format: date-time }
+        database_dropped: { type: boolean }
+
+    TestResult:
+      type: object
+      properties:
+        name: { type: string }
+        port_checks:
+          type: object
+          additionalProperties: { type: boolean }
+
+    ServerInfo:
+      type: object
+      properties:
+        hostname: { type: string }
+        vpn_ip: { type: string }
+        freeradius_version: { type: string }
+        mariadb_version: { type: string }
+        capacity_max: { type: integer }
+        instances_count: { type: integer }
+        uptime_seconds: { type: integer }
+        rm_api_version: { type: string }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, degraded] }
+        checks:
+          type: object
+          additionalProperties: { type: string }
+        issues:
+          type: array
+          items: { type: string }
+
+    APIError:
+      type: object
+      properties:
+        error: { type: string, example: "instance_not_found" }
+        message: { type: string }
+        instance: { type: string, nullable: true }
+
+paths:
+  /v1/server/health:
+    get:
+      summary: Health probe (public, no auth)
+      security: []
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Degraded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/server/info:
+    get:
+      summary: Server metadata
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerInfo" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIError" }
+
+  /v1/instances:
+    get:
+      summary: List all instances on this server
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Instance" }
+    post:
+      summary: Create a new instance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateInstanceRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateInstanceResponse" }
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIError" }
+        "409":
+          description: Already exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIError" }
+
+  /v1/instances/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[a-z0-9_]{1,32}$"
+      - name: include_secrets
+        in: query
+        required: false
+        schema: { type: boolean, default: false }
+    get:
+      summary: Get an instance's full info (and optionally its secrets)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+        "404":
+          description: Not found
+    delete:
+      parameters:
+        - name: with_db
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+      summary: Delete an instance
+      responses:
+        "200":
+          description: Deleted (or already deleted, idempotent)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteInstanceResponse" }
+
+  /v1/instances/{name}/start:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Start the instance API service
+      responses:
+        "200": { description: Started }
+        "404": { description: Not found }
+
+  /v1/instances/{name}/stop:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Stop the instance API service
+      responses:
+        "200": { description: Stopped }
+        "404": { description: Not found }
+
+  /v1/instances/{name}/restart:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Restart the instance API service
+      responses:
+        "200": { description: Restarted }
+
+  /v1/instances/{name}/test:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Probe instance ports for liveness
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestResult" }
+
+  /v1/openapi.yaml:
+    get:
+      summary: Self-describing OpenAPI 3 spec (public)
+      security: []
+      responses:
+        "200":
+          description: This document
+          content:
+            application/yaml: {}
