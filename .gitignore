@@ -1,0 +1,9 @@
+# Build artifacts
+/bin/
+
+# OS junk
+.DS_Store
+
+# Editor
+*.swp
+*.swo
