@@ -74,6 +74,15 @@ services:
       # freeradius-api bootstrap (template-once + copy per instance).
       RM_API_BOOTSTRAP_REPO: "https://github.com/heirro/freeradius-api"
       RM_API_BOOTSTRAP_TEMPLATE_DIR: "/var/lib/radius-manager-api/freeradius-api-template"
+
+      # v0.3.0 maintenance timers (autoclearzombie + autobackups3).
+      # supervisord backend matches the systemd backend choice above —
+      # both use the same supervisord PID 1 in this dev container.
+      # S3 vars left empty → autobackups3 is skipped automatically.
+      RM_API_MAINTENANCE_BACKEND: "supervisord"
+      # RM_API_S3_REMOTE: "ljns3"          # uncomment + set rclone config to enable
+      # RM_API_S3_BUCKET: "backup-db"
+      # RM_API_S3_BACKUP_ROOT: "radiusdb"
     volumes:
       # Persist token across rebuilds so existing curl scripts keep working.
       - rm_api_etc:/etc/radius-manager-api

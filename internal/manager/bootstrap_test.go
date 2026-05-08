@@ -182,3 +182,187 @@ func TestTeardown_RemovesAPIDir(t *testing.T) {
 		t.Fatal("api dir should be removed")
 	}
 }
+
+// patchScriptsParams returns a SetupInstanceParams matching the bash
+// setup_api() example: localhost MariaDB on 3306, instance "mitra_x".
+func patchScriptsParams() SetupInstanceParams {
+	return SetupInstanceParams{
+		APIDir:       "/root/mitra_x-api",
+		InstanceName: "mitra_x",
+		DBHost:       "10.254.252.2",
+		DBPort:       3306,
+		DBName:       "mitra_x",
+		DBUser:       "mitra_x",
+		DBPass:       "Sup3rSecret!",
+	}
+}
+
+func TestPatchScripts_AutoclearzombieDBLines(t *testing.T) {
+	b, _, _, fs := newTestBootstrap()
+	const apiDir = "/root/mitra_x-api"
+	const original = `#!/usr/bin/env bash
+# autoclearzombie.sh — kills stale sessions
+DB_HOST="default-host"
+DB_PORT="3306"
+DB_USER="defaultuser"
+DB_PASS="defaultpass"
+DB_NAME="defaultdb"
+
+set -euo pipefail
+echo "running"
+`
+	fs.Files[apiDir+"/autoclearzombie.sh"] = []byte(original)
+
+	if err := b.PatchScripts(context.Background(), patchScriptsParams(), S3Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := string(fs.Files[apiDir+"/autoclearzombie.sh"])
+	wantContains := []string{
+		`DB_HOST="10.254.252.2"`,
+		`DB_PORT="3306"`,
+		`DB_USER="mitra_x"`,
+		`DB_PASS="Sup3rSecret!"`,
+		`DB_NAME="mitra_x"`,
+		`#!/usr/bin/env bash`,
+		`set -euo pipefail`,
+		`echo "running"`,
+	}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Errorf("autoclearzombie missing %q\nfull:\n%s", w, got)
+		}
+	}
+
+	// File should have been written with mode 0700 (executable) — check
+	// last WriteFile call recorded for this path.
+	mode := lastWriteMode(fs, apiDir+"/autoclearzombie.sh")
+	if mode != "mode=700" {
+		t.Errorf("expected WriteFile mode 700, got %q", mode)
+	}
+}
+
+func TestPatchScripts_AutobackupS3DBAndS3Lines(t *testing.T) {
+	b, _, _, fs := newTestBootstrap()
+	const apiDir = "/root/mitra_x-api"
+	const original = `#!/usr/bin/env bash
+REMOTE="default"
+BUCKET="default-bucket"
+BACKUP_PATH="default/path"
+DB_HOST="default"
+DB_PORT="3306"
+DB_USER="default"
+DB_PASS="default"
+DB_NAME="default"
+
+# real script body below
+echo "backing up"
+`
+	fs.Files[apiDir+"/autobackups3.sh"] = []byte(original)
+
+	s3 := S3Config{Remote: "ljns3", Bucket: "backup-db", BackupRoot: "radiusdb"}
+	if err := b.PatchScripts(context.Background(), patchScriptsParams(), s3); err != nil {
+		t.Fatal(err)
+	}
+	got := string(fs.Files[apiDir+"/autobackups3.sh"])
+	wantContains := []string{
+		`REMOTE="ljns3"`,
+		`BUCKET="backup-db"`,
+		`BACKUP_PATH="radiusdb/mitra_x"`,
+		`DB_HOST="10.254.252.2"`,
+		`DB_PORT="3306"`,
+		`DB_USER="mitra_x"`,
+		`DB_PASS="Sup3rSecret!"`,
+		`DB_NAME="mitra_x"`,
+		`# real script body below`,
+		`echo "backing up"`,
+	}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Errorf("autobackups3 missing %q\nfull:\n%s", w, got)
+		}
+	}
+}
+
+func TestPatchScripts_SkipsMissingScriptsSilently(t *testing.T) {
+	b, _, _, fs := newTestBootstrap()
+	// No scripts pre-loaded — both should be silently skipped.
+	if err := b.PatchScripts(context.Background(), patchScriptsParams(),
+		S3Config{Remote: "ljns3", Bucket: "backup-db", BackupRoot: "radiusdb"}); err != nil {
+		t.Fatalf("expected no error when scripts missing, got %v", err)
+	}
+	if len(fs.Files) != 0 {
+		t.Errorf("no files should be written when scripts missing, got: %v", keys(fs.Files))
+	}
+}
+
+func TestPatchScripts_PreservesUnrelatedLines(t *testing.T) {
+	b, _, _, fs := newTestBootstrap()
+	const apiDir = "/root/mitra_x-api"
+	const original = `#!/usr/bin/env bash
+# important comment, MUST not be touched
+SOME_OTHER_VAR="keep me"
+DB_HOST="old"
+inline_DB_HOST="this should also stay because not at line start"
+echo "DB_HOST inside echo line should also be left alone"
+`
+	fs.Files[apiDir+"/autoclearzombie.sh"] = []byte(original)
+
+	if err := b.PatchScripts(context.Background(), patchScriptsParams(), S3Config{}); err != nil {
+		t.Fatal(err)
+	}
+	got := string(fs.Files[apiDir+"/autoclearzombie.sh"])
+	preserved := []string{
+		`# important comment, MUST not be touched`,
+		`SOME_OTHER_VAR="keep me"`,
+		`inline_DB_HOST="this should also stay because not at line start"`,
+		`echo "DB_HOST inside echo line should also be left alone"`,
+	}
+	for _, w := range preserved {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing preserved line %q\nfull:\n%s", w, got)
+		}
+	}
+	// And DB_HOST at start of line was rewritten.
+	if !strings.Contains(got, `DB_HOST="10.254.252.2"`) {
+		t.Errorf("expected DB_HOST rewrite\nfull:\n%s", got)
+	}
+}
+
+func TestPatchScripts_AutobackupS3SkipsS3WhenZeroConfig(t *testing.T) {
+	b, _, _, fs := newTestBootstrap()
+	const apiDir = "/root/mitra_x-api"
+	const original = `REMOTE="keep-this"
+BUCKET="keep-this"
+BACKUP_PATH="keep-this"
+DB_HOST="default"
+`
+	fs.Files[apiDir+"/autobackups3.sh"] = []byte(original)
+
+	if err := b.PatchScripts(context.Background(), patchScriptsParams(), S3Config{}); err != nil {
+		t.Fatal(err)
+	}
+	got := string(fs.Files[apiDir+"/autobackups3.sh"])
+	// DB_HOST gets rewritten regardless of S3 config.
+	if !strings.Contains(got, `DB_HOST="10.254.252.2"`) {
+		t.Errorf("expected DB_HOST rewrite\nfull:\n%s", got)
+	}
+	// S3 lines preserved when S3Config is zero.
+	for _, w := range []string{`REMOTE="keep-this"`, `BUCKET="keep-this"`, `BACKUP_PATH="keep-this"`} {
+		if !strings.Contains(got, w) {
+			t.Errorf("expected preserved %q\nfull:\n%s", w, got)
+		}
+	}
+}
+
+// lastWriteMode digs out the mode argument for the most recent
+// WriteFile call recording the given path.
+func lastWriteMode(fs *system.MockFilesystem, path string) string {
+	var got string
+	for _, c := range fs.Calls {
+		if c.Method == "WriteFile" && len(c.Args) >= 2 && c.Args[0] == path {
+			got = c.Args[1]
+		}
+	}
+	return got
+}

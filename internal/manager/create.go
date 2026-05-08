@@ -167,7 +167,7 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 		if err := i.cfg.APIBootstrap.EnsureTemplate(ctx); err != nil {
 			return nil, fmt.Errorf("ensure freeradius-api template: %w", err)
 		}
-		if err := i.cfg.APIBootstrap.SetupInstance(ctx, SetupInstanceParams{
+		setupParams := SetupInstanceParams{
 			APIDir:       apiDir,
 			InstanceName: name,
 			DBHost:       dbHost,
@@ -177,12 +177,40 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 			DBPass:       dbPass,
 			SwaggerUser:  "admin",
 			SwaggerPass:  swPass,
-		}); err != nil {
+		}
+		if err := i.cfg.APIBootstrap.SetupInstance(ctx, setupParams); err != nil {
 			return nil, fmt.Errorf("bootstrap api dir %s: %w", apiDir, err)
 		}
 		bootstrap := i.cfg.APIBootstrap
 		apiDirCopy := apiDir
 		addCleanup(func() error { return bootstrap.Teardown(context.Background(), apiDirCopy) })
+
+		// Patch hardcoded credentials in the maintenance scripts (mirror
+		// of bash setup_api()'s sed step). Idempotent: missing scripts
+		// are silently skipped, so the same call works whether the repo
+		// template ships these helpers or not.
+		if err := i.cfg.APIBootstrap.PatchScripts(ctx, setupParams, i.cfg.MaintenanceS3); err != nil {
+			return nil, fmt.Errorf("patch maintenance scripts: %w", err)
+		}
+	}
+
+	// ---- Step 6c: install maintenance timers (v0.3.0) ----
+	// Skipped when Maintenance or APIBootstrap is nil (the scripts only
+	// exist on disk after bootstrap, so a timer pointing at them would
+	// fire and ENOENT). Removal happens in DeleteInstance.
+	if i.cfg.Maintenance != nil && i.cfg.APIBootstrap != nil {
+		if err := i.cfg.Maintenance.SetupForInstance(ctx, name, MaintenanceCreds{
+			DBHost: dbHost,
+			DBPort: dbPort,
+			DBName: dbName,
+			DBUser: dbUser,
+			DBPass: dbPass,
+		}); err != nil {
+			return nil, fmt.Errorf("setup maintenance for %s: %w", name, err)
+		}
+		mm := i.cfg.Maintenance
+		nameCopy := name
+		addCleanup(func() error { return mm.TeardownForInstance(context.Background(), nameCopy) })
 	}
 
 	// ---- Step 7: write systemd unit + start ----

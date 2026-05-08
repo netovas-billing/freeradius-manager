@@ -107,6 +107,10 @@ func (RealFilesystem) WriteFile(_ context.Context, path string, content []byte, 
 	return os.WriteFile(path, content, os.FileMode(mode))
 }
 
+func (RealFilesystem) ReadFile(_ context.Context, path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
 func (RealFilesystem) RemoveFile(_ context.Context, path string) error {
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {

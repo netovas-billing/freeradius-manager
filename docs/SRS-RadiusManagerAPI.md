@@ -2,9 +2,9 @@
 
 | Field | Value |
 |-------|-------|
-| Versi | 0.2.0 |
-| Tanggal | 2026-05-07 |
-| Status | 0.2.0 — Adds Docker local dev stack (§19) with supervisord-backed Systemctl. Phase 2 (create/delete), 3 (lifecycle), 4 (audit + OpenAPI) remain validated. End-to-end smoke test now reproducible from macOS without a Linux VM. |
+| Versi | 0.3.0 |
+| Tanggal | 2026-05-08 |
+| Status | 0.3.0 — Adds per-instance maintenance timers (§20) backed by the new `system.Maintenance` interface (RealMaintenance via systemd `.timer + .service`, SupervisordMaintenance via sleep-loop program). RM-Q03 is now resolved: autoclearzombie + autobackups3 are scheduled by RM-API at CreateInstance time instead of by `update.sh`. v0.2.0 Docker dev stack remains intact. |
 | Parent | `docs/PRD.md` v1.0.0, `docs/SRS.md` v1.0.0 |
 | Owner | Tim Network Operations + Tim Platform |
 | Bahasa Implementasi | Go (1.22+) |
@@ -810,7 +810,7 @@ Dokumen ini **tidak memodifikasi** PRD.md atau SRS.md. Tetapi ada beberapa bagia
 | RM-Q02 | Swagger UI di RM-API? | **Tidak** — generate `openapi.yaml` saja, embed via `//go:embed`. Tidak ada `/docs` runtime. | §4 (kontrak ada di doc ini) |
 | RM-Q06 | Schema MariaDB import strategy? | **Embed `.sql` via Go `embed` package**. File `internal/schema/*.sql` di-compile ke binary. Migration via incremental file naming (`001_init.sql`, dst). | §7.5, §11 |
 | (impl) | HTTP framework | **chi** (`github.com/go-chi/chi/v5`) — lightweight, net/http compatible. | §7 |
-| RM-Q03 | autoclearzombie + autobackups3 cron jobs perlu di-port ke RM-API? | **Skip di v0.1.0** — integrasi via mekanisme terpisah nanti. Reason: keep RM-API focused on lifecycle, biarkan bash continue handle ops scripts (cron tetap di-manage `radius-manager.sh`/`update.sh`). | §18 |
+| RM-Q03 | autoclearzombie + autobackups3 cron jobs perlu di-port ke RM-API? | **Resolved di v0.3.0**: implemented via `Maintenance` interface (`internal/system/maintenance.go`) dengan backend RealMaintenance (systemd `.timer + .service` pair) dan SupervisordMaintenance (sleep-loop program). Per-instance timer setup otomatis saat CreateInstance ketika `RM_API_MAINTENANCE_BACKEND` di-set. Lihat §20. | §20 |
 | (impl) | freeradius-api repo strategy (clone + venv per instance) | **Template-once + copy per instance**. Implementation deferred ke v0.2.0. Phase 2 saat ini hanya generate systemd unit yang reference `apiDir` yang diharapkan; bootstrap `git clone` + `python -m venv` belum dilakukan oleh RM-API. | §17, §18 |
 
 ### 15.2. Masih Open
@@ -831,6 +831,7 @@ Dokumen ini **tidak memodifikasi** PRD.md atau SRS.md. Tetapi ada beberapa bagia
 | 0.1.1 | 2026-05-07 | Lock 4 keputusan kunci: systemd unit per instance (RM-Q01), no Swagger UI (RM-Q02), embed schema.sql (RM-Q06), chi framework. |
 | 0.1.2 | 2026-05-07 | Phase 2 (create/delete), Phase 3 (lifecycle: start/stop/restart/test), dan Phase 4 (audit log + OpenAPI export) selesai diimplementasi dan ter-cover unit test. Tambah §13.5 Implementation Status, §17 Real-Environment Validation TODO, §18 Known Deviations from `radius-manager.sh`. Resolve RM-Q03 (cron jobs di-skip) dan freeradius-api repo strategy (deferred ke v0.2.0). |
 | 0.2.0 | 2026-05-07 | Tambah §19 Docker Local Dev Stack: image multi-stage Debian-slim dengan supervisord sebagai PID 1, `SupervisordSystemctl`/`SupervisordFreeRADIUS` di `internal/system/supervisord.go`, env var `RM_API_SYSTEMD_BACKEND` untuk seleksi backend, env var `RM_API_INSTANCE_DB_HOST/PORT` untuk konfigurasi DB host per-instance (default tetap `localhost:3306`). Schema migration `001_init.sql` di-replace dari placeholder ke canonical FreeRADIUS MySQL schema (radacct, radcheck, radreply, radusergroup, radgroupcheck, radgroupreply, radpostauth, nas, nasreload). Entrypoint script auto-tambah `multiStatements=true` ke DSN. RM-V01 partially closed (E2E flow `POST /v1/instances` → instance up → DB schema imported → `<name>-api` running) sudah lulus di Docker dev stack; RM-V02..RM-V06 masih perlu Linux real VM. |
+| 0.3.0 | 2026-05-08 | Tambah §20 Maintenance Timers: `system.Maintenance` interface (`InstallJob`/`RemoveJob`/`ListJobs`) dengan backend `RealMaintenance` (systemd `.timer + .service` pair) dan `SupervisordMaintenance` (sleep-loop program). `manager.MaintenanceManager` orchestrate dua job per instance — `<name>-zombie` (every 15m) + `<name>-backup` (daily, hanya kalau S3 dikonfigurasi). `bootstrap.PatchScripts` rewrite `^DB_*=...$` / `^REMOTE=`/`^BUCKET=`/`^BACKUP_PATH=` lines di `autoclearzombie.sh` dan `autobackups3.sh` (mirror dari sed step di radius-manager.sh:setup_api). Env vars baru: `RM_API_MAINTENANCE_BACKEND`, `RM_API_S3_REMOTE`, `RM_API_S3_BUCKET`, `RM_API_S3_BACKUP_ROOT`. RM-Q03 resolved (sebelumnya skip), RM-D03 ditandai migrated (cron lewat `update.sh` digantikan oleh systemd timer per-instance yang di-install otomatis oleh RM-API). |
 
 ---
 
@@ -859,7 +860,7 @@ Hal-hal di mana implementasi Go di RM-API **secara sengaja berbeda** dengan bash
 |---|------|----------------------------|-------------|------------------|
 | RM-D01 | Random port pick | Loop dengan `$RANDOM` (16-bit, distribusi tidak rata) | `crypto/rand` (uniform across range) | Tidak — keduanya tetap pick port di range yang sama, hanya distribusi statistik berbeda. |
 | RM-D02 | DB password generation | Pipeline `openssl rand -base64 ... \| tr ... \| head -c ...` | `crypto/rand` direct ke alphabet whitelist | Tidak — entropy equivalent, output character set sama. Implementasi Go lebih sederhana, no shell-out. |
-| RM-D03 | Cron job patching `autoclearzombie.sh` + `autobackups3.sh` | Bash `update.sh` patch crontab system-wide saat `update` | **TIDAK direplikasi** oleh RM-API (per RM-Q03 — di-skip di v0.1.0) | Ya, but intentional: bash side tetap manage cron via `update.sh`. RM-API tidak menyentuh crontab. |
+| RM-D03 | Cron job patching `autoclearzombie.sh` + `autobackups3.sh` | Bash `update.sh` patch crontab system-wide saat `update` | **Migrated di v0.3.0**: RM-API install systemd `.timer + .service` per instance via `MaintenanceManager` (lihat §20). Crontab tidak dipakai. Bash flow tetap kompatibel sebagai fallback (operator yang masih pakai `update.sh` cron tetap bekerja, hanya saja RM-API timer akan duplicate eksekusi — operator harus pilih satu source-of-truth). | Ya: RM-API sekarang install timer otomatis. |
 | RM-D04 | Python venv setup + `git clone` freeradius-api per instance | Bash do `git clone` + `python -m venv` + `pip install` saat create | **Belum direplikasi** oleh RM-API. Saat ini Phase 2 hanya tulis systemd unit yang reference direktori API yang diharapkan. Bootstrap repo deferred ke v0.2.0. | Ya, sementara: operator harus pre-provision direktori API (atau pakai bash create dulu). Akan ditutup di v0.2.0. |
 | RM-D05 | Format port registry | Bash tulis `<port> # <admin> <kind>` per baris | Go **preserve format yang sama** (parsing + write); `flock(2)` tetap dipakai | Tidak — format file 1:1 compatible dengan bash. |
 
@@ -980,3 +981,72 @@ Tidak ada interaksi. Bash script tidak ada di image (image ini ditujukan untuk R
 - TLS — listener default plaintext HTTP. Production wajib pasang reverse proxy / mTLS via dokumen lain.
 - Multi-instance scaling — satu container, satu freeradius. Tidak menggambarkan sharded production deploy.
 - Persistensi `.port_registry` cross-restart — saat ini volume mount `/etc/freeradius/3.0` persist, tapi belum ada test untuk crash-recovery.
+
+---
+
+## 20. Maintenance Timers (Autoclearzombie + Autobackups3)
+
+### 20.1. Tujuan
+
+Menggantikan cron entries yang sebelumnya di-manage oleh `radius-manager.sh:setup_api()` + `update.sh` dengan scheduling backend yang explicit, audit-friendly, dan per-instance. Dua maintenance script yang berasal dari freeradius-api repo:
+
+| Script | Frekuensi | Job name | Tujuan |
+|--------|-----------|----------|--------|
+| `autoclearzombie.sh` | every 15 minutes | `<instance>-zombie` | Cleanup stale `radacct` sessions (kill PPPoE leftovers). |
+| `autobackups3.sh` | `@daily` | `<instance>-backup` | Dump per-instance MariaDB lalu push ke S3 via `rclone`. |
+
+Backup job hanya di-install kalau `RM_API_S3_REMOTE` di-set. Kalau kosong, hanya `<instance>-zombie` yang aktif (sesuai prinsip: zombie cleanup is essential, S3 backup optional).
+
+### 20.2. Flow CreateInstance (v0.3.0)
+
+```
+Step 6b: bootstrap.SetupInstance       — git clone template, copy ke <APIDir>, venv + .env
+Step 6b': bootstrap.PatchScripts       — sed-equivalent rewrite DB_* + REMOTE/BUCKET/BACKUP_PATH
+                                          di autoclearzombie.sh & autobackups3.sh (idempoten,
+                                          skip kalau script tidak ada)
+Step 6c:  Maintenance.SetupForInstance — InstallJob untuk <instance>-zombie + <instance>-backup
+                                          dengan env DB_HOST/PORT/USER/PASS/NAME (+ REMOTE/BUCKET/
+                                          BACKUP_PATH untuk backup). Belt-and-suspenders: env
+                                          override + script default keduanya benar.
+```
+
+DeleteInstance memanggil `Maintenance.TeardownForInstance` BEFORE menyentuh systemd unit / DB drop, sehingga timer tidak fire mid-delete (mis. `autobackups3` race dengan `DROP DATABASE`).
+
+### 20.3. Backend Selection
+
+| Backend | Implementasi | Kapan dipakai |
+|---------|--------------|----------------|
+| `systemd` (default) | `system.RealMaintenance`: tulis `<job>.timer` + `<job>.service` ke `/etc/systemd/system`, `daemon-reload`, `enable --now`. Schedule `every 15m` → `OnCalendar=*:0/15`; `daily` → `OnCalendar=daily`. | Production Linux VM. |
+| `supervisord` | `system.SupervisordMaintenance`: tulis `[program:<job>]` dengan `command=/bin/sh -c 'while true; do <command>; sleep <N>; done'`. | Docker dev stack (no systemd). |
+| `none` | Tidak konstruksi `MaintenanceManager` sama sekali. CreateInstance skip step 6c. | Operator yang masih pakai `update.sh` cron, atau env minimal. |
+
+Selection via env `RM_API_MAINTENANCE_BACKEND`. Default `systemd` karena production target.
+
+### 20.4. Env Vars
+
+| Env | Default | Effect |
+|-----|---------|--------|
+| `RM_API_MAINTENANCE_BACKEND` | `systemd` | `systemd` / `supervisord` / `none`. |
+| `RM_API_S3_REMOTE` | (empty) | rclone remote name (mis. `ljns3`). Empty → backup timer di-skip; zombie timer tetap di-install. |
+| `RM_API_S3_BUCKET` | (empty) | S3 bucket (mis. `backup-db`). |
+| `RM_API_S3_BACKUP_ROOT` | `radiusdb` | Prefix path; per-instance suffix di-append jadi `<root>/<instance>`. |
+
+### 20.5. Trade-off: Kenapa Systemd Timer
+
+Pilihan adalah **Option B (systemd timer)** vs alternatif (cron, child process, internal Go ticker):
+
+| Alternatif | Pro | Con — kenapa rejected |
+|------------|-----|----------------------|
+| Cron via `crontab -e` (bash existing) | Simpel | System-wide crontab ditulis manual, susah di-audit per instance, conflict kalau ada >1 admin manage. RM-API butuh idempoten + per-instance teardown. |
+| Child process Go (goroutine) | No external deps | RM-API restart → semua timer reset, bisa miss eksekusi. Tidak survive process crash. |
+| Systemd timer (chosen) | Sudah dependency RM-API (`<name>-api.service` juga systemd), audit-friendly (`systemctl list-timers`), survive RM-API restart, per-instance teardown clean. | Tidak jalan di Docker — diatasi dengan SupervisordMaintenance. |
+| Supervisord sleep-loop | Jalan di Docker | Schedule kasar (sleep-loop bukan calendar-aware), tapi acceptable untuk dev. |
+
+Conclusion: systemd di production, supervisord fallback di Docker dev, dan selection lewat env. Sama dengan pattern yang sudah ada untuk `Systemctl` (RM_API_SYSTEMD_BACKEND).
+
+### 20.6. Idempotency & Cleanup
+
+- `InstallJob` dengan name yang sudah ada akan overwrite unit / program block.
+- `RemoveJob` dengan name yang tidak ada return nil (tidak error).
+- `Maintenance.TeardownForInstance` ALWAYS panggil RemoveJob untuk dua nama (`<name>-zombie`, `<name>-backup`) — aman dipanggil walaupun salah satu/keduanya tidak pernah di-install.
+- `bootstrap.PatchScripts` skip silently kalau file tidak ada (mis. freeradius-api template revisi lama tidak ship `autobackups3.sh`).

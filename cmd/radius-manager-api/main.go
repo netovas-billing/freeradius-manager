@@ -89,6 +89,10 @@ Environment (read by 'serve'):
   RM_API_SYSTEMD_BACKEND           "systemd" (default, real Linux) or "supervisord" (Docker dev)
   RM_API_INSTANCE_DB_HOST          DB host written into per-instance configs, default localhost
   RM_API_INSTANCE_DB_PORT          DB port written into per-instance configs, default 3306
+  RM_API_MAINTENANCE_BACKEND       "systemd" (default), "supervisord" (Docker dev), or "none" (disable maintenance timers)
+  RM_API_S3_REMOTE                 rclone remote name for autobackups3 (e.g. "ljns3"); empty disables backup timer
+  RM_API_S3_BUCKET                 S3 bucket name (e.g. "backup-db")
+  RM_API_S3_BACKUP_ROOT            backup path prefix; per-instance suffix appended automatically (default "radiusdb")
 `, version)
 }
 
@@ -181,6 +185,38 @@ func runServe() error {
 				slog.String("repo", cfg.BootstrapAPIRepo),
 				slog.String("template_dir", cfg.BootstrapTemplateDir),
 				slog.Bool("skip_pull", cfg.BootstrapSkipPull),
+			)
+		}
+
+		// v0.3.0 maintenance timers. Independent backend selection from
+		// systemd backend so operator can mix-and-match if needed (rare).
+		// "none" disables timer setup entirely; CreateInstance then skips
+		// the new step exactly like v0.2.0.
+		var maintBackend system.Maintenance
+		switch cfg.MaintenanceBackend {
+		case "none":
+			// leave nil
+		case "supervisord":
+			maintBackend = system.NewSupervisordMaintenance(system.NewSupervisordSystemctl())
+		default: // "systemd"
+			maintBackend = system.NewRealMaintenance(system.NewRealSystemctl())
+		}
+		if maintBackend != nil {
+			s3 := manager.S3Config{
+				Remote:     cfg.S3Remote,
+				Bucket:     cfg.S3Bucket,
+				BackupRoot: cfg.S3BackupRoot,
+			}
+			managerCfg.Maintenance = &manager.MaintenanceManager{
+				Backend:    maintBackend,
+				APIDirBase: cfg.APIDirBase,
+				S3:         s3,
+			}
+			managerCfg.MaintenanceS3 = s3
+			logger.Info("maintenance timers enabled",
+				slog.String("backend", cfg.MaintenanceBackend),
+				slog.String("s3_remote", cfg.S3Remote),
+				slog.String("s3_bucket", cfg.S3Bucket),
 			)
 		}
 	}

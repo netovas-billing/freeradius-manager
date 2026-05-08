@@ -3,6 +3,7 @@ package system
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 )
 
@@ -174,6 +175,23 @@ func (m *MockFilesystem) WriteFile(_ context.Context, path string, content []byt
 	m.Files[path] = c
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *MockFilesystem) ReadFile(_ context.Context, path string) ([]byte, error) {
+	m.mu.Lock()
+	m.Calls = append(m.Calls, Call{Method: "ReadFile", Args: []string{path}})
+	if err := m.Failures["ReadFile"]; err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	content, ok := m.Files[path]
+	m.mu.Unlock()
+	if !ok {
+		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
+	}
+	out := make([]byte, len(content))
+	copy(out, content)
+	return out, nil
 }
 
 func (m *MockFilesystem) RemoveFile(_ context.Context, path string) error {

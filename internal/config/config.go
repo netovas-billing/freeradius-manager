@@ -47,6 +47,26 @@ type Config struct {
 	// RM_API_INSTANCE_DB_PORT, default 3306.
 	InstanceDBHost string
 	InstanceDBPort int
+
+	// MaintenanceBackend selects the system.Maintenance backend used to
+	// schedule per-instance autoclearzombie / autobackups3 jobs.
+	//   "systemd"     — production Linux; .timer + .service unit pair.
+	//   "supervisord" — Docker dev; sleep-loop program.
+	//   "none"        — disables maintenance entirely (preserves v0.2.0).
+	// RM_API_MAINTENANCE_BACKEND, default "systemd".
+	MaintenanceBackend string
+
+	// S3Remote / S3Bucket / S3BackupRoot configure the autobackups3
+	// destination embedded into the script and into the timer's env.
+	// Empty S3Remote disables the backup timer (autoclearzombie still
+	// runs). Mirrors the constants from radius-manager.sh:
+	//   S3_REMOTE        ljns3
+	//   S3_BUCKET        backup-db
+	//   S3_BACKUP_ROOT   radiusdb
+	// RM_API_S3_REMOTE, RM_API_S3_BUCKET, RM_API_S3_BACKUP_ROOT (default "radiusdb").
+	S3Remote     string
+	S3Bucket     string
+	S3BackupRoot string
 }
 
 func Load() (*Config, error) {
@@ -67,6 +87,10 @@ func Load() (*Config, error) {
 		BootstrapSkipPull:    strings.EqualFold(os.Getenv("RM_API_BOOTSTRAP_SKIP_PULL"), "true"),
 		SystemdBackend:       strings.ToLower(getenv("RM_API_SYSTEMD_BACKEND", "systemd")),
 		InstanceDBHost:       getenv("RM_API_INSTANCE_DB_HOST", "localhost"),
+		MaintenanceBackend:   strings.ToLower(getenv("RM_API_MAINTENANCE_BACKEND", "systemd")),
+		S3Remote:             os.Getenv("RM_API_S3_REMOTE"),
+		S3Bucket:             os.Getenv("RM_API_S3_BUCKET"),
+		S3BackupRoot:         getenv("RM_API_S3_BACKUP_ROOT", "radiusdb"),
 	}
 	dbPort := getenv("RM_API_INSTANCE_DB_PORT", "3306")
 	if n, err := strconv.Atoi(dbPort); err == nil && n > 0 {

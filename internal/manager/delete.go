@@ -42,6 +42,13 @@ func (i *impl) DeleteInstance(ctx context.Context, name string, withDB bool) (*t
 		}
 	}
 
+	// 0. Tear down maintenance timers first so they can't fire mid-delete
+	// (e.g. autobackups3 hitting an in-progress DROP DATABASE). Idempotent
+	// — missing jobs are not an error per the system.Maintenance contract.
+	if i.cfg.Maintenance != nil {
+		keep(i.cfg.Maintenance.TeardownForInstance(ctx, name))
+	}
+
 	// 1. Tear down the API service.
 	unitName := name + "-api.service"
 	keep(i.cfg.Systemctl.Stop(ctx, unitName))

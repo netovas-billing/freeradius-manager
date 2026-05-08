@@ -32,6 +32,12 @@ type FreeRADIUS interface {
 // can be verified in tests without touching /etc.
 type Filesystem interface {
 	WriteFile(ctx context.Context, path string, content []byte, mode uint32) error
+	// ReadFile returns the contents of path. Used by bootstrap to patch
+	// hardcoded credentials in the freeradius-api maintenance scripts
+	// (autoclearzombie.sh, autobackups3.sh) before they are scheduled.
+	// Implementations should return os.ErrNotExist (or a wrapper) when
+	// path is missing so callers can skip silently.
+	ReadFile(ctx context.Context, path string) ([]byte, error)
 	RemoveFile(ctx context.Context, path string) error
 	Symlink(ctx context.Context, target, link string) error
 	RemoveSymlink(ctx context.Context, link string) error

@@ -2,12 +2,38 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sync"
 
 	"github.com/heirro/freeradius-manager/internal/system"
 )
+
+// S3Config carries the S3 backup destination passed to the
+// autobackups3.sh credential patcher. Zero-value means the
+// autobackups3 timer is not installed (and any pre-existing job is
+// removed). Mirrors the constants from radius-manager.sh:
+//
+//	S3_REMOTE        ljns3
+//	S3_BUCKET        backup-db
+//	S3_BACKUP_ROOT   radiusdb       (per-instance suffix appended)
+type S3Config struct {
+	Remote     string
+	Bucket     string
+	BackupRoot string
+}
+
+// IsZero reports whether the S3Config is unconfigured. Treats Remote
+// and Bucket as the required pair; BackupRoot can default to "radiusdb"
+// without enabling backups. This matches the config-side contract:
+// empty RM_API_S3_REMOTE means "no backups".
+func (s S3Config) IsZero() bool {
+	return s.Remote == "" || s.Bucket == ""
+}
 
 // FreeRADIUSAPIBootstrap encapsulates the template-once + copy-per-instance
 // strategy for the freeradius-api repo (per RM-Q answer: option B).
@@ -115,6 +141,140 @@ func (b *FreeRADIUSAPIBootstrap) SetupInstance(ctx context.Context, p SetupInsta
 // Teardown removes the API directory. Idempotent.
 func (b *FreeRADIUSAPIBootstrap) Teardown(ctx context.Context, apiDir string) error {
 	return b.FS.RemoveDir(ctx, apiDir)
+}
+
+// PatchScripts rewrites the hardcoded `KEY="..."` shell-variable lines
+// at the top of the freeradius-api maintenance scripts so the cloned
+// template gets per-instance DB credentials and S3 destination baked
+// in. Mirrors what radius-manager.sh:setup_api() does with sed(1).
+//
+// Files handled:
+//
+//	autoclearzombie.sh — DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME
+//	autobackups3.sh   — DB_* (same keys) + REMOTE, BUCKET, BACKUP_PATH
+//
+// Idempotent: a missing script is silently skipped (treated as a
+// template that doesn't ship that maintenance helper). The Maintenance
+// interface backend (.service unit) also injects these as environment
+// variables; the in-script patching is belt-and-suspenders for older
+// freeradius-api revisions that don't honor env overrides.
+func (b *FreeRADIUSAPIBootstrap) PatchScripts(ctx context.Context, p SetupInstanceParams, s3 S3Config) error {
+	if err := validateIdentifier(p.InstanceName); err != nil {
+		return err
+	}
+	if p.APIDir == "" {
+		return fmt.Errorf("APIDir is required")
+	}
+
+	dbReplacements := map[string]string{
+		"DB_HOST": p.DBHost,
+		"DB_PORT": fmt.Sprintf("%d", p.DBPort),
+		"DB_USER": p.DBUser,
+		"DB_PASS": p.DBPass,
+		"DB_NAME": p.DBName,
+	}
+
+	// autoclearzombie.sh: DB credentials only.
+	if err := b.patchScript(ctx,
+		filepath.Join(p.APIDir, "autoclearzombie.sh"),
+		dbReplacements,
+	); err != nil {
+		return fmt.Errorf("patch autoclearzombie.sh: %w", err)
+	}
+
+	// autobackups3.sh: DB credentials + S3 destination.
+	backupReplacements := make(map[string]string, len(dbReplacements)+3)
+	for k, v := range dbReplacements {
+		backupReplacements[k] = v
+	}
+	if !s3.IsZero() {
+		backupReplacements["REMOTE"] = s3.Remote
+		backupReplacements["BUCKET"] = s3.Bucket
+		// BACKUP_PATH = <root>/<instance>  (matches bash setup_api()).
+		backupReplacements["BACKUP_PATH"] = path.Join(s3.BackupRoot, p.InstanceName)
+	}
+	if err := b.patchScript(ctx,
+		filepath.Join(p.APIDir, "autobackups3.sh"),
+		backupReplacements,
+	); err != nil {
+		return fmt.Errorf("patch autobackups3.sh: %w", err)
+	}
+	return nil
+}
+
+// patchScript loads scriptPath, rewrites each `^KEY=...$` line whose
+// KEY appears in replacements, and writes the file back with mode 0700
+// (preserving the executable bit the bash flow sets via chmod +x).
+//
+// If the script doesn't exist, returns nil (idempotent skip). Any
+// other read error is returned wrapped.
+func (b *FreeRADIUSAPIBootstrap) patchScript(ctx context.Context, scriptPath string, replacements map[string]string) error {
+	content, err := b.FS.ReadFile(ctx, scriptPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", scriptPath, err)
+	}
+	patched := applyShellVarPatches(content, replacements)
+	if err := b.FS.WriteFile(ctx, scriptPath, patched, 0o700); err != nil {
+		return fmt.Errorf("write %s: %w", scriptPath, err)
+	}
+	return nil
+}
+
+// applyShellVarPatches rewrites lines matching `^KEY=...$` (anchored at
+// start of a line, allowing leading whitespace is intentional) for any
+// KEY in replacements. Other lines pass through untouched, including
+// comments, blanks, and any in-line definitions where `KEY=` is not at
+// the start of the line. This matches sed `-e "s|^KEY=.*|KEY=...|"`.
+func applyShellVarPatches(content []byte, replacements map[string]string) []byte {
+	if len(replacements) == 0 {
+		return content
+	}
+	keys := make([]string, 0, len(replacements))
+	for k := range replacements {
+		keys = append(keys, regexp.QuoteMeta(k))
+	}
+	// Build a single regex `^(KEY1|KEY2|...)=.*$` (multiline) to keep
+	// the rewrite a single pass over the file.
+	re := regexp.MustCompile(`(?m)^(` + joinAlt(keys) + `)=.*$`)
+	return re.ReplaceAllFunc(content, func(line []byte) []byte {
+		// Extract the matched KEY (everything before the first '=').
+		eq := indexByte(line, '=')
+		if eq < 0 {
+			return line
+		}
+		key := string(line[:eq])
+		val, ok := replacements[key]
+		if !ok {
+			return line
+		}
+		return []byte(key + `="` + val + `"`)
+	})
+}
+
+// joinAlt joins regex alternatives without depending on strings.Join
+// import (kept tiny to avoid bloating the patch surface).
+func joinAlt(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += "|" + p
+	}
+	return out
+}
+
+// indexByte mirrors bytes.IndexByte without forcing the import here.
+func indexByte(b []byte, c byte) int {
+	for i, x := range b {
+		if x == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // renderAPIEnvFile produces a .env that matches what bash setup_api()

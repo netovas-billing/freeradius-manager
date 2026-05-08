@@ -352,6 +352,110 @@ func TestCreateInstance_WithBootstrap_ClonesAndSetsUpAPIDir(t *testing.T) {
 	}
 }
 
+func TestCreateInstance_WithMaintenance_InstallsTimers(t *testing.T) {
+	i, _, _, fs, mock, cleanup := newCreateTestImpl(t)
+	defer cleanup()
+
+	// Bootstrap is required for the maintenance branch to fire.
+	mockGit := system.NewMockGit()
+	mockPy := system.NewMockPython()
+	bootstrap := &FreeRADIUSAPIBootstrap{
+		RepoURL:     "https://github.com/heirro/freeradius-api",
+		TemplateDir: filepath.Join(t.TempDir(), "fr-api-template"),
+		Git:         mockGit,
+		Python:      mockPy,
+		FS:          fs,
+	}
+	i.cfg.APIBootstrap = bootstrap
+	maint := system.NewMockMaintenance()
+	i.cfg.Maintenance = &MaintenanceManager{
+		Backend:    maint,
+		APIDirBase: i.cfg.APIDirBase,
+		S3:         S3Config{Remote: "ljns3", Bucket: "backup-db", BackupRoot: "radiusdb"},
+	}
+	i.cfg.MaintenanceS3 = i.cfg.Maintenance.S3
+
+	mock.ExpectExec("USE `mitra_x`").WillReturnError(sqlmock.ErrCancelled)
+	mock.ExpectExec("CREATE DATABASE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
+		WillReturnRows(sqlmock.NewRows([]string{"t"}))
+	mock.ExpectExec("USE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CREATE TABLE radcheck").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+
+	if _, ok := maint.Jobs["mitra_x-zombie"]; !ok {
+		t.Errorf("mitra_x-zombie job not installed; jobs=%v", maint.Jobs)
+	}
+	if _, ok := maint.Jobs["mitra_x-backup"]; !ok {
+		t.Errorf("mitra_x-backup job not installed; jobs=%v", maint.Jobs)
+	}
+
+	// Maintenance teardown should run on subsequent DeleteInstance.
+	// Verify with DeleteInstance smoke (no DB drop to keep mock simple).
+	if _, err := i.DeleteInstance(context.Background(), "mitra_x", false); err != nil {
+		t.Fatalf("DeleteInstance: %v", err)
+	}
+	if len(maint.Jobs) != 0 {
+		t.Errorf("expected jobs cleared after DeleteInstance, got: %v", maint.Jobs)
+	}
+}
+
+func TestCreateInstance_MaintenanceFailure_RollsBack(t *testing.T) {
+	i, sysctl, _, fs, mock, cleanup := newCreateTestImpl(t)
+	defer cleanup()
+
+	mockGit := system.NewMockGit()
+	mockPy := system.NewMockPython()
+	bootstrap := &FreeRADIUSAPIBootstrap{
+		RepoURL:     "https://github.com/heirro/freeradius-api",
+		TemplateDir: filepath.Join(t.TempDir(), "fr-api-template"),
+		Git:         mockGit,
+		Python:      mockPy,
+		FS:          fs,
+	}
+	i.cfg.APIBootstrap = bootstrap
+	maint := system.NewMockMaintenance()
+	maint.Failures["InstallJob"] = errors.New("systemd dead")
+	i.cfg.Maintenance = &MaintenanceManager{Backend: maint, APIDirBase: i.cfg.APIDirBase}
+
+	// DB expectations + cleanup expectations on rollback.
+	mock.ExpectExec("USE `mitra_x`").WillReturnError(sqlmock.ErrCancelled)
+	mock.ExpectExec("CREATE DATABASE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
+		WillReturnRows(sqlmock.NewRows([]string{"t"}))
+	mock.ExpectExec("USE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CREATE TABLE radcheck").WillReturnResult(sqlmock.NewResult(0, 0))
+	// Rollback path:
+	mock.ExpectExec("USE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DROP DATABASE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectExec("DROP USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err == nil {
+		t.Fatal("expected CreateInstance to fail when maintenance install fails")
+	}
+	// systemd unit should not have been written: maintenance step is BEFORE
+	// the systemd unit step in the new ordering.
+	if _, ok := sysctl.UnitContent["mitra_x-api.service"]; ok {
+		t.Error("systemd unit should not be written when maintenance fails")
+	}
+}
+
 func TestCreateInstance_BootstrapFailureRollsBack(t *testing.T) {
 	i, sysctl, _, fs, mock, cleanup := newCreateTestImpl(t)
 	defer cleanup()

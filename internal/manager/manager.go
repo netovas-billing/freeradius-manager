@@ -79,6 +79,19 @@ type Config struct {
 	// When nil, CreateInstance assumes the API directory has been
 	// pre-provisioned out of band (the v0.1.x behavior).
 	APIBootstrap *FreeRADIUSAPIBootstrap
+
+	// Maintenance schedules per-instance autoclearzombie + autobackups3
+	// timers via the system.Maintenance backend (v0.3.0). Nil preserves
+	// v0.2.0 behavior (no timers installed) so existing tests / older
+	// deployments continue to work unchanged. See §20 of the SRS.
+	Maintenance *MaintenanceManager
+
+	// MaintenanceS3 is the S3 destination passed through to
+	// FreeRADIUSAPIBootstrap.PatchScripts when populated. Independent
+	// from Maintenance because PatchScripts can patch the autobackups3
+	// script even if scheduling is disabled (e.g. operator runs the
+	// script manually). Zero-value disables the autobackups3 patch.
+	MaintenanceS3 S3Config
 }
 
 func New(cfg Config) Manager {
