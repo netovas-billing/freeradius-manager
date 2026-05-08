@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/heirro/freeradius-manager/internal/api"
-	"github.com/heirro/freeradius-manager/internal/manager"
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/internal/api"
+	"github.com/netovas-billing/freeradius-manager/internal/manager"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 // stubManager is a configurable in-memory implementation of manager.Manager

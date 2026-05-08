@@ -10,8 +10,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/heirro/freeradius-manager/internal/manager"
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/internal/manager"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

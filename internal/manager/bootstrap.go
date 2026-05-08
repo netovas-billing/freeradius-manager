@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/heirro/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
 // S3Config carries the S3 backup destination passed to the

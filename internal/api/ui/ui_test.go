@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/heirro/freeradius-manager/internal/api/ui"
+	"github.com/netovas-billing/freeradius-manager/internal/api/ui"
 )
 
 // newRouter wires the UI handler under /ui/ exactly the way the API server

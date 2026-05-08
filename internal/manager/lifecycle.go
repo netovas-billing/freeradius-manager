@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 // unitNameFor returns the systemd unit name for the per-instance API.

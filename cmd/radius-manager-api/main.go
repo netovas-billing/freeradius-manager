@@ -23,11 +23,11 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/heirro/freeradius-manager/internal/api"
-	"github.com/heirro/freeradius-manager/internal/config"
-	"github.com/heirro/freeradius-manager/internal/manager"
-	"github.com/heirro/freeradius-manager/internal/schema"
-	"github.com/heirro/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/api"
+	"github.com/netovas-billing/freeradius-manager/internal/config"
+	"github.com/netovas-billing/freeradius-manager/internal/manager"
+	"github.com/netovas-billing/freeradius-manager/internal/schema"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
 const version = "0.1.0"

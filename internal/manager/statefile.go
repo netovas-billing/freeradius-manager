@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 // readWholeFile reads a file's contents in one shot. Used by the

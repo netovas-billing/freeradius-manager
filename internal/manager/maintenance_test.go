@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/heirro/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
 func newTestMaintenance(s3 S3Config) (*MaintenanceManager, *system.MockMaintenance) {

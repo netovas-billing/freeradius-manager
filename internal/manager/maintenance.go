@@ -6,7 +6,7 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/heirro/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
 // MaintenanceManager owns the policy of which periodic jobs each

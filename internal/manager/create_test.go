@@ -9,8 +9,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	"github.com/heirro/freeradius-manager/internal/system"
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 func newCreateTestImpl(t *testing.T) (*impl, *system.MockSystemctl, *system.MockFreeRADIUS, *system.MockFilesystem, sqlmock.Sqlmock, func()) {

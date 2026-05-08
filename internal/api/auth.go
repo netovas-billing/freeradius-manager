@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 // Authenticator validates a bearer token. Implementations may use a static

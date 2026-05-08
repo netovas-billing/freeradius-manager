@@ -8,7 +8,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	"github.com/heirro/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
 func TestDeleteInstance_FullPath_WithDB(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 // DeleteInstance is the inverse of CreateInstance, in reverse step order:

@@ -14,9 +14,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	uipkg "github.com/heirro/freeradius-manager/internal/api/ui"
-	"github.com/heirro/freeradius-manager/internal/manager"
-	"github.com/heirro/freeradius-manager/pkg/types"
+	uipkg "github.com/netovas-billing/freeradius-manager/internal/api/ui"
+	"github.com/netovas-billing/freeradius-manager/internal/manager"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 type Server struct {

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/heirro/freeradius-manager/internal/templates"
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/internal/templates"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 // CreateInstance orchestrates the full instance bring-up. The transactional

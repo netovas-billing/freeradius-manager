@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/heirro/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
 func newTestBootstrap() (*FreeRADIUSAPIBootstrap, *system.MockGit, *system.MockPython, *system.MockFilesystem) {

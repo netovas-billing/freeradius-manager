@@ -9,8 +9,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/heirro/freeradius-manager/internal/system"
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 var (

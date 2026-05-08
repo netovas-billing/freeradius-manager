@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/heirro/freeradius-manager/pkg/types"
+	"github.com/netovas-billing/freeradius-manager/pkg/types"
 )
 
 var startTime = time.Now()

@@ -1,4 +1,4 @@
-module github.com/heirro/freeradius-manager
+module github.com/netovas-billing/freeradius-manager
 
 go 1.26.2
 
