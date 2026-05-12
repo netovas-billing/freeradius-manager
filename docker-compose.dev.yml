@@ -50,15 +50,23 @@ services:
       mariadb:
         condition: service_healthy
     ports:
-      - "127.0.0.1:9000:9000"
-      # FreeRADIUS auth/acct, exposed so radclient on the host can probe.
-      - "127.0.0.1:1812:1812/udp"
-      - "127.0.0.1:1813:1813/udp"
+      # Bind 0.0.0.0 untuk dev — backend container (Docker bridge) + browser
+      # dari LAN dua-duanya bisa akses. Production wajib pakai reverse proxy
+      # + IP whitelist + token rotation.
+      - "9000:9000"
+      # FreeRADIUS auth/acct — bind 0.0.0.0 supaya NAS MikroTik dari LAN bisa hit.
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+      # Per-instance freeradius-api processes — port range untuk multi-tenant.
+      - "8100-8200:8100-8200"
     environment:
       # rm-api itself
       RM_API_LISTEN: "0.0.0.0:9000"
       RM_API_LOG_FORMAT: "text"
-      RM_API_API_PUBLISH_IP: "127.0.0.1"
+      # IP yang ditulis ke radius_servers.url saat instance baru dibuat.
+      # Pakai LAN IP host supaya backend container (di Docker bridge) bisa
+      # reach via 192.168.200.189:<port>. Localhost binding bikin URL salah.
+      RM_API_API_PUBLISH_IP: "192.168.200.189"
       RM_API_SYSTEMD_BACKEND: "supervisord"
 
       # MariaDB connection (entrypoint composes RM_API_DB_DSN from these).
