@@ -23,6 +23,7 @@ GO_VERSION="${GO_VERSION:-1.26.2}"
 BIN_DST="/usr/local/bin/radius-manager-api"
 ETC_DIR="/etc/radius-manager-api"
 TOKEN_FILE="${ETC_DIR}/token"
+ENV_FILE="${ETC_DIR}/env"
 STATE_DIR="/var/lib/radius-manager-api"
 LOG_DIR="/var/log/radius-manager-api"
 UNIT_DST="/etc/systemd/system/radius-manager-api.service"
@@ -216,6 +217,44 @@ else
     ok "generated $TOKEN_FILE (root:root, 0600)"
 fi
 
+# Berkas setelan per-host. TIDAK ditimpa saat install ulang: isinya keputusan
+# operator (alamat yang diumumkan ke backend, kapasitas mesin), bukan sesuatu
+# yang boleh dikembalikan ke bawaan diam-diam oleh installer.
+if [[ -f "$ENV_FILE" ]]; then
+    ok "$ENV_FILE sudah ada - tidak diubah"
+else
+    cat > "$ENV_FILE" <<'ENVEOF'
+# Setelan per-host radius-manager-api.
+# Berlaku sesudah `systemctl restart radius-manager-api`.
+#
+# ── RM_API_API_PUBLISH_IP — SETELAN PALING PENTING DI BERKAS INI ────────────
+# Alamat yang DIUMUMKAN ke backend: nilai ini dipakai menyusun
+# "http://<alamat>:<port>" setiap kali instance baru dibuat, dan URL itu
+# TERSIMPAN di database backend (radius_servers.url).
+#
+# Dibiarkan kosong → jatuh ke 0.0.0.0, dan setiap instance lahir dengan URL
+# yang tak bisa dihubungi siapa pun. Provisioning tetap dilaporkan BERHASIL —
+# kegagalannya baru terasa saat instance itu dipakai.
+#
+# Isi dengan alamat yang dipakai BACKEND untuk menghubungi mesin ini:
+#   - backend menjangkau lewat DSTNAT concentrator → IP PUBLIK concentrator
+#   - backend satu jaringan dengan mesin ini       → IP privat mesin ini
+#RM_API_API_PUBLISH_IP=103.242.104.67
+
+# Alamat bind. Bawaan dari installer ada di unit; timpa di sini bila perlu.
+# Mengikat langsung ke IP tunnel TIDAK disarankan: alamat itu baru ada setelah
+# VPN naik, sehingga service gagal start saat boot. Pakai 0.0.0.0 + firewall.
+#RM_API_LISTEN=0.0.0.0:9000
+
+# Jumlah instance FreeRADIUS yang boleh hidup di mesin ini. Angka ini juga
+# dipakai ERP untuk menghitung rentang port yang perlu di-NAT di concentrator
+# — kalau dinaikkan, paste ulang skrip concentrator-nya.
+#RM_API_CAPACITY_MAX=50
+ENVEOF
+    chmod 0600 "$ENV_FILE"
+    ok "wrote $ENV_FILE (0600) - isi RM_API_API_PUBLISH_IP sebelum dipakai"
+fi
+
 # -- Phase 8: state + log dirs ------------------------------------------------
 phase "State and log dirs"
 for d in "$STATE_DIR" "$LOG_DIR"; do
@@ -279,8 +318,7 @@ ExecStart=${BIN_DST} serve
 Restart=on-failure
 RestartSec=5s
 
-# Environment - override per-host via drop-ins under
-# /etc/systemd/system/radius-manager-api.service.d/override.conf
+# Environment - nilai bawaan yang masuk akal untuk semua host.
 Environment="RM_API_LISTEN=${RM_INSTALL_BIND}"
 Environment="RM_API_TOKEN_FILE=${TOKEN_FILE}"
 Environment="RM_API_FREERADIUS_DIR=/etc/freeradius/3.0"
@@ -291,6 +329,13 @@ Environment="RM_API_AUDIT_LOG=${LOG_DIR}/audit.log"
 Environment="RM_API_BOOTSTRAP_REPO=https://github.com/heirro/freeradius-api"
 Environment="RM_API_BOOTSTRAP_TEMPLATE_DIR=${STATE_DIR}/freeradius-api-template"
 Environment="RM_API_CAPACITY_MAX=50"
+
+# Setelan PER-HOST dibaca dari berkas ini. Diletakkan SESUDAH Environment=
+# di atas dengan sengaja: systemd memakai nilai yang dibaca BELAKANGAN, jadi
+# apa pun yang ditulis operator di sini menang atas bawaan di atas.
+#
+# Tanda "-" = berkasnya boleh tidak ada (service tetap start).
+EnvironmentFile=-${ENV_FILE}
 
 # Hardening - same set the source unit ships with.
 NoNewPrivileges=yes
@@ -340,6 +385,15 @@ for u in radius-manager-api mariadb freeradius; do
 done
 
 # -- Phase 14: summary --------------------------------------------------------
+# Peringatan keras: tanpa RM_API_API_PUBLISH_IP, setiap instance lahir dengan
+# URL http://0.0.0.0:<port> yang tersimpan ke database backend. Provisioning
+# tetap dilaporkan sukses, dan kegagalannya baru terasa saat instance dipakai.
+if ! grep -qE '^[[:space:]]*RM_API_API_PUBLISH_IP=' "$ENV_FILE" 2>/dev/null; then
+    warn "RM_API_API_PUBLISH_IP belum diisi di $ENV_FILE"
+    warn "  → instance baru akan lahir dengan URL http://0.0.0.0:<port> dan tidak bisa dihubungi backend."
+    warn "  → isi dulu, lalu: systemctl restart radius-manager-api"
+fi
+
 phase "Summary"
 cat <<EOF
 
@@ -348,6 +402,7 @@ cat <<EOF
   API URL          http://${RM_INSTALL_BIND}/
   Health           http://${RM_INSTALL_BIND}/v1/server/health
   Token file       ${TOKEN_FILE}      (0600 root:root)
+  Setelan per-host ${ENV_FILE}        (0600 root:root)
   Binary           ${BIN_DST}
   Source           ${SOURCE_DIR}
   State dir        ${STATE_DIR}

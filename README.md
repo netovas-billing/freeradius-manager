@@ -32,6 +32,35 @@ make e2e
 make help
 ```
 
+## Pasang di server (produksi)
+
+Debian/Ubuntu bersih — **`install.sh`**, bukan `docker compose`. Berkas
+`docker-compose.dev.yml` hanya untuk uji coba di laptop (`make docker-up`).
+
+```bash
+sudo RM_INSTALL_BIND=0.0.0.0:9000 bash install.sh
+```
+
+Installer memasang MariaDB + FreeRADIUS + Go, membangun biner, menulis unit
+systemd, lalu menguji `/v1/server/health` sendiri. Idempoten.
+
+Setelah itu isi **`/etc/radius-manager-api/env`** (dibuat installer, 0600,
+tidak pernah ditimpa saat install ulang):
+
+| Variabel | Kenapa penting |
+|---|---|
+| `RM_API_API_PUBLISH_IP` | Alamat yang **diumumkan ke backend**. Nilai ini tersimpan ke `radius_servers.url` setiap instance baru. Kosong → jatuh ke `0.0.0.0`, provisioning tetap "berhasil" tapi instance-nya tak bisa dihubungi siapa pun. Isi IP publik concentrator bila backend masuk lewat DSTNAT. |
+| `RM_API_LISTEN` | Alamat bind. Jangan diikat langsung ke IP tunnel — alamat itu baru ada setelah VPN naik, sehingga service gagal start saat boot. Pakai `0.0.0.0` + firewall. |
+| `RM_API_CAPACITY_MAX` | Jumlah instance yang boleh hidup di mesin ini. Ikut menentukan rentang port yang perlu di-NAT di concentrator — kalau dinaikkan, paste ulang skrip concentrator-nya. |
+
+```bash
+sudo nano /etc/radius-manager-api/env
+sudo systemctl restart radius-manager-api
+```
+
+Kalau mesin ini hidup di dalam VPN concentrator, sambungkan tunnelnya dengan
+[`scripts/vpn-client-setup.sh`](scripts/vpn-client-setup.sh).
+
 ## Persyaratan
 
 - OS: Ubuntu/Debian

@@ -11,13 +11,24 @@ ExecStart=/usr/local/bin/radius-manager-api serve
 Restart=on-failure
 RestartSec=5s
 
-# Bind only to the VPN private interface; override per-host as needed.
+# Nilai bawaan. Setelan per-host ditulis di /etc/radius-manager-api/env
+# (lihat EnvironmentFile di bawah) — bukan di berkas ini, supaya install ulang
+# tidak menimpa keputusan operator.
 Environment="RM_API_LISTEN=127.0.0.1:9000"
 Environment="RM_API_TOKEN_FILE=/etc/radius-manager-api/token"
 Environment="RM_API_FREERADIUS_DIR=/etc/freeradius/3.0"
 Environment="RM_API_STATE_DIR=/var/lib/radius-manager-api"
 Environment="RM_API_CAPACITY_MAX=50"
 Environment="RM_API_LOG_FORMAT=json"
+
+# Setelan per-host. Diletakkan SESUDAH Environment= di atas dengan sengaja:
+# systemd memakai nilai yang dibaca BELAKANGAN, jadi isi berkas ini menang.
+# Tanda "-" = boleh tidak ada.
+#
+# Yang paling penting di sana: RM_API_API_PUBLISH_IP. Kosong → jatuh ke
+# 0.0.0.0, dan setiap instance lahir dengan URL yang tersimpan ke database
+# backend tapi tak bisa dihubungi siapa pun.
+EnvironmentFile=-/etc/radius-manager-api/env
 
 # Hardening
 NoNewPrivileges=yes
