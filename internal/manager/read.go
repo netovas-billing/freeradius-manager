@@ -77,6 +77,8 @@ func (i *impl) ServerInfo(ctx context.Context) (*types.ServerInfo, error) {
 		InstancesCount:    count,
 		UptimeSeconds:     int64(time.Since(startTime).Seconds()),
 		RMAPIVersion:      i.cfg.APIVersion,
+		APIPortStart:      i.apiPortStart(),
+		Listen:            i.cfg.Listen,
 	}, nil
 }
 

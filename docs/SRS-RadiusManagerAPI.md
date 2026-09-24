@@ -352,7 +352,9 @@ Authorization: Bearer <api_token>
   "capacity_max": 50,
   "instances_count": 12,
   "uptime_seconds": 345600,
-  "rm_api_version": "0.1.0"
+  "rm_api_version": "0.1.0",
+  "listen": "0.0.0.0:20000",
+  "api_port_start": 20100
 }
 ```
 
@@ -430,9 +432,53 @@ Untuk v1, satu token = full access. Future:
 
 ### 6.1. Listen Configuration
 
-- **Default port**: `9000`.
+- **Default port**: `9000` (hanya bawaan biner; di produksi portnya = `base`
+  blok yang dialokasikan ERP, lihat §6.1.1).
 - **Default bind**: `<vpn_ip>:9000` (bukan `0.0.0.0:9000`) — hanya accept dari private network.
-- **Override**: env `RM_API_LISTEN=10.254.252.2:9000`.
+- **Override**: env `RM_API_LISTEN=0.0.0.0:20000` — nilainya berasal dari skrip
+  pemasangan yang diterbitkan menu "Server RADIUS Manager → Setup Script".
+
+### 6.1.1. Blok Port freeradius-api (beberapa VM di satu concentrator)
+
+- **Skema kanonik (ditentukan ERP).** Satu VPN concentrator bisa menaungi lebih
+  dari satu VM RADIUS, dan backend menjangkau tiap VM lewat DSTNAT di IP publik
+  concentrator. NAT-nya 1:1 (tanpa `to-ports`) karena URL instance yang
+  diterbitkan RM-API sudah memuat nomor portnya sendiri, jadi ERP yang
+  mengalokasikan blok port tiap VM:
+
+  | | Nilai |
+  |---|---|
+  | `base` | `20000 + k*1000` (`k` = urutan VM di concentrator) |
+  | `RM_API_LISTEN` | `base` (`20000`, `21000`, …) |
+  | `RM_API_API_PORT_START` | `base + 100` (`20100`, `21100`, …) |
+  | lebar blok VM | `1000` port (`[base, base+999]`) |
+  | rentang port instance | `[base+100, base+999]` = **900** port |
+
+- **Sumber nilai tunggal**: skrip pemasangan yang diterbitkan menu "Server
+  RADIUS Manager → Setup Script". Angka yang dikarang sendiri (mis. `8100`)
+  tidak cocok dengan aturan DSTNAT concentrator: instance lahir di luar rentang
+  yang di-NAT, provisioning tetap dilaporkan sukses, dan permintaan mendarat di
+  VM yang keliru atau tidak sampai sama sekali — **gagal senyap**.
+- **Fallback & validasi**: tanpa env, blok jatuh ke `8100` (naik satu-satu).
+  Nilai bukan angka atau di luar `1024–64000` ditolak → kembali ke `8100`
+  dengan `WARN` yang menyebut nilai mentahnya. Blok efektif dicatat di log tiap
+  service start (juga dalam mode read-only) dan diumumkan di `/v1/server/info`
+  (`listen`, `api_port_start`) supaya ERP bisa memverifikasinya.
+- **Alokasi tidak pernah keluar rentang**: penelusuran port API berhenti di
+  `api_port_start + min(900, RM_API_CAPACITY_MAX)` dan mengembalikan galat saat
+  habis — bukan memakai port di luar rentang. Lebarnya **900**, bukan 1000,
+  karena dihitung dari `api_port_start = base+100`: pagar selebar 1000 akan
+  merambah ke `[base+1000, base+1099]`, yang dimulai tepat di `RM_API_LISTEN`
+  VM TETANGGA.
+- **Klem nilai identik dua sisi** (Go dan `radius-manager.sh`): pangkas hanya
+  spasi di ujung, lalu terima hanya digit (nol di depan dibaca desimal, jadi
+  `0020100` = `20100`; `20 100` ditolak). Keduanya menulis satu `.port_registry`,
+  jadi aturan yang berbeda berarti satu mesin memakai dua blok port.
+- Port UDP RADIUS (`10000–59000`) tidak terpengaruh: lewat tunnel langsung,
+  tidak pernah di-NAT, jadi tidak pernah bertabrakan antar-VM.
+- `radius-manager.sh` berbagi `.port_registry` dengan RM-API dan **memuat
+  sendiri** `/etc/radius-manager-api/env` bila ada, dengan klem nilai yang sama;
+  env yang sudah di-export di shell menang atas isi berkas.
 
 ### 6.2. Jalur Network ERP → RM-API
 

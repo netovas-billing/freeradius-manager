@@ -36,7 +36,224 @@ FR_SCHEMA="$FREERADIUS_DIR/mods-config/sql/main/mysql/schema.sql"
 
 API_DIR_BASE="/root"
 API_REPO="https://github.com/heirro/freeradius-api"
-PORT_API_START=8100
+# ── Blok port REST API ───────────────────────────────────────────────────────
+# Skrip ini dan radius-manager-api berbagi .port_registry, jadi bloknya harus
+# SAMA di satu mesin. Kalau beda, instance yang dibuat lewat skrip ini lahir di
+# luar rentang port yang di-DSTNAT di concentrator: backend tidak pernah bisa
+# menghubunginya, dan tidak ada galat di mana pun (gagal senyap).
+#
+# Nilainya DITENTUKAN ERP (skema: base 20000 + k*1000 → RM_API_LISTEN=base,
+# RM_API_API_PORT_START=base+100) dan tersimpan di berkas setelan per-host.
+# Berkas itu dimuat OTOMATIS di sini: sebelumnya cuma disebut di komentar,
+# sehingga operator yang menjalankan skrip ini di shell biasa memakai 8100
+# sementara RM-API Go memakai blok lain — dua blok berbeda menulis satu
+# .port_registry yang sama.
+RM_API_ENV_FILE="${RM_API_ENV_FILE:-/etc/radius-manager-api/env}"
+# Nilai yang SUDAH di-export di shell harus menang atas isi berkas (mis. saat
+# uji coba: RM_API_API_PORT_START=20100 bash radius-manager.sh create ...),
+# jadi simpan dulu sebelum berkasnya dibaca.
+_RM_SHELL_API_PORT_START="${RM_API_API_PORT_START:-}"
+_RM_SHELL_CAPACITY_MAX="${RM_API_CAPACITY_MAX:-}"
+
+# load_rm_api_env mengambil HANYA kunci berawalan RM_API_ dari berkas setelan.
+#
+# JANGAN kembali ke `set -a; . "$RM_API_ENV_FILE"`: sourcing utuh menimpa
+# SELURUH ruang nama global skrip ini, dan dilakukan SESUDAH PORT_REGISTRY,
+# DB_HOST, FREERADIUS_DIR, dan API_DIR_BASE ditetapkan di atas. Satu baris
+# senama di berkas env — disalin orang, ditulis generator, atau diselipkan —
+# langsung membajak skrip: `PORT_REGISTRY=/tmp/jahat` membuat pendaftaran port
+# ditulis ke berkas lain, sehingga skrip ini dan RM-API Go tidak lagi melihat
+# port yang sama dan sama-sama membagikan port yang sudah terpakai. Tabrakan
+# port itu tidak memunculkan galat di mana pun.
+#
+# Nilai tetap di-export supaya proses anak (mis. radius-manager-api) ikut
+# melihatnya, persis seperti `set -a` dulu — hanya saja terbatas RM_API_*.
+load_rm_api_env() {
+    local file="$1" line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Pangkas spasi di kedua ujung baris.
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in
+            'export '*)
+                line="${line#export }"
+                line="${line#"${line%%[![:space:]]*}"}"
+                ;;
+        esac
+        # Komentar, baris kosong, dan kunci NON-RM_API_ diabaikan total.
+        case "$line" in
+            RM_API_*=*) ;;
+            *) continue ;;
+        esac
+        key="${line%%=*}"
+        case "$key" in
+            *[!A-Za-z0-9_]*) continue ;;
+        esac
+        val="${line#*=}"
+        # Bentuk-bentuk yang lazim di berkas env ditangani persis seperti saat
+        # berkasnya di-source: kutip pembungkus dilepas, dan komentar di ujung
+        # baris dibuang. Isinya dipakai APA ADANYA — tanpa eval, jadi `$(...)`
+        # atau `$VAR` di dalam berkas tidak pernah dijalankan/diperluas.
+        case "$val" in
+            \"*) val="${val#\"}"; val="${val%%\"*}" ;;
+            \'*) val="${val#\'}"; val="${val%%\'*}" ;;
+            *)
+                case "$val" in
+                    *[[:space:]]\#*) val="${val%%[[:space:]]\#*}" ;;
+                esac
+                val="${val%"${val##*[![:space:]]}"}"
+                ;;
+        esac
+        printf -v "$key" '%s' "$val"
+        export "${key?}"
+    done < "$file"
+    return 0
+}
+
+if [ -f "$RM_API_ENV_FILE" ] && [ ! -r "$RM_API_ENV_FILE" ]; then
+    # Berkas itu ditulis 0600 milik root. Dulu penjaganya cuma `[ -r ]`, jadi
+    # eksekusi non-root melewatinya TANPA sepatah kata pun dan diam-diam
+    # memakai blok bawaan 8100 — sementara RM-API Go (root) memakai blok dari
+    # ERP. Dua blok berbeda menulis satu .port_registry yang sama, dan instance
+    # yang lahir di 8100 tidak ikut di-DSTNAT concentrator: provisioning
+    # "berhasil", backend tak pernah bisa menghubunginya.
+    echo "[WARN] $RM_API_ENV_FILE ADA tapi tidak terbaca (dijalankan sebagai $(id -un 2>/dev/null || echo '?'))." >&2
+    echo "[WARN] Blok port dari ERP TIDAK terpakai; skrip jatuh ke bawaan. Jalankan ulang dengan sudo." >&2
+elif [ -r "$RM_API_ENV_FILE" ]; then
+    load_rm_api_env "$RM_API_ENV_FILE" ||
+        echo "[WARN] gagal membaca $RM_API_ENV_FILE; memakai nilai bawaan." >&2
+fi
+if [ -n "$_RM_SHELL_API_PORT_START" ]; then
+    RM_API_API_PORT_START="$_RM_SHELL_API_PORT_START"
+fi
+if [ -n "$_RM_SHELL_CAPACITY_MAX" ]; then
+    RM_API_CAPACITY_MAX="$_RM_SHELL_CAPACITY_MAX"
+fi
+
+PORT_API_START_DEFAULT=8100
+PORT_API_START_MIN=1024
+PORT_API_START_MAX=64000
+# Lebar rentang port INSTANCE, dihitung DARI PORT_API_START — bukan lebar blok
+# VM. Blok VM ke-k selebar 1000: [base, base+999] dengan base = 20000 + k*1000.
+# 100 port pertama blok itu bukan milik instance (base = RM_API_LISTEN, port
+# RM-API, sisanya cadangan kontrol), jadi instance mulai di base+100 dan hanya
+# boleh memakai 900 port sisanya.
+#
+# Kalau angka ini 1000, pagarnya sampai base+1099: 100 port teratas MILIK VM
+# TETANGGA, dimulai tepat di RM_API_LISTEN VM itu. Instance yang lahir di sana
+# tidak di-DSTNAT ke mesin ini — permintaan backend mendarat di VM yang keliru
+# dan tidak ada galat di mana pun. Harus sama dengan DefaultAPIBlockWidth di
+# internal/manager/ports.go.
+PORT_API_BLOCK_WIDTH=900
+# Bawaan RM_API_CAPACITY_MAX harus sama dengan internal/config.Load() (50):
+# pagar alokasi = PORT_API_START + min(lebar blok, capacity). Kalau bawaannya
+# beda, skrip ini dan RM-API Go berhenti di port yang berbeda padahal menulis
+# .port_registry yang sama.
+PORT_API_CAPACITY_MAX_DEFAULT=50
+
+# trim_ends memangkas HANYA spasi di UJUNG. Spasi di TENGAH sengaja dibiarkan
+# supaya "20 100" tetap ditolak — dulu `tr -d '[:space:]'` membuangnya dan bash
+# membaca 20100 sementara Go menolak nilai itu dan memakai 8100. Dua sisi, dua
+# blok port, satu .port_registry: tabrakan port yang senyap.
+trim_ends() {
+    local s="${1:-}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# strip_leading_zeros: "0020100" -> "20100" (selalu sisa minimal satu digit),
+# supaya nol di depan dibaca DESIMAL, bukan oktal.
+strip_leading_zeros() {
+    local d="${1:-0}"
+    while [ "${#d}" -gt 1 ] && [ "${d#0}" != "$d" ]; do
+        d="${d#0}"
+    done
+    printf '%s' "$d"
+}
+
+# parse_uint menegakkan aturan angka yang SAMA PERSIS dengan
+# config.ParseAPIPortStart di Go: pangkas spasi ujung, lalu terima HANYA digit
+# (nol di depan boleh, desimal). Selain itu gagal (return 1), termasuk spasi di
+# tengah, tanda +/-, dan angka lebih dari 5 digit (tak mungkin jadi nomor port
+# dan tidak boleh diandalkan lewat overflow aritmetika).
+parse_uint() {
+    local trimmed digits
+    trimmed="$(trim_ends "${1:-}")"
+    [ -n "$trimmed" ] || return 1
+    case "$trimmed" in
+        *[!0-9]*) return 1 ;;
+    esac
+    digits="$(strip_leading_zeros "$trimmed")"
+    [ "${#digits}" -le 5 ] || return 1
+    printf '%s' "$((10#$digits))"
+}
+
+# sanitize_api_port_start menegakkan klem yang SAMA dengan sisi Go
+# (internal/config/config.go + internal/manager/ports.go): bukan angka atau di
+# luar 1024–64000 → kembali ke bawaan, dengan peringatan. Tanpa ini
+# "RM_API_API_PORT_START=70000" dipakai apa adanya dan "delapanribu" ikut lolos
+# jadi nomor port, sehingga instance lahir di port yang mustahil di-NAT tapi
+# provisioning tetap terlihat berhasil.
+# Peringatan sengaja ke stderr supaya tidak ikut tertangkap $(...).
+sanitize_api_port_start() {
+    local raw n
+    raw="${1:-}"
+    if [ -z "$(trim_ends "$raw")" ]; then
+        printf '%s' "$PORT_API_START_DEFAULT"
+        return 0
+    fi
+    if ! n="$(parse_uint "$raw")"; then
+        echo "[WARN] RM_API_API_PORT_START='${raw}' bukan angka; memakai ${PORT_API_START_DEFAULT}." >&2
+        echo "[WARN] Ambil nilai yang benar dari skrip menu 'Server RADIUS Manager -> Setup Script'." >&2
+        printf '%s' "$PORT_API_START_DEFAULT"
+        return 0
+    fi
+    if [ "$n" -lt "$PORT_API_START_MIN" ] || [ "$n" -gt "$PORT_API_START_MAX" ]; then
+        echo "[WARN] RM_API_API_PORT_START='${raw}' di luar ${PORT_API_START_MIN}-${PORT_API_START_MAX}; memakai ${PORT_API_START_DEFAULT}." >&2
+        printf '%s' "$PORT_API_START_DEFAULT"
+        return 0
+    fi
+    printf '%s' "$n"
+}
+
+# sanitize_capacity_max membaca RM_API_CAPACITY_MAX dari berkas setelan yang
+# sama. Skrip ini WAJIB memakai pagar yang sama dengan RM-API Go: ERP
+# menghitung rentang DSTNAT dari capacity, jadi port ke-(capacity+1) pun sudah
+# di luar yang di-NAT. Dulu skrip ini tidak pernah membacanya dan terus
+# mengalokasikan sampai ujung blok.
+sanitize_capacity_max() {
+    local raw trimmed digits
+    raw="${1:-}"
+    trimmed="$(trim_ends "$raw")"
+    if [ -z "$trimmed" ]; then
+        printf '%s' "$PORT_API_CAPACITY_MAX_DEFAULT"
+        return 0
+    fi
+    case "$trimmed" in
+        *[!0-9]*)
+            echo "[WARN] RM_API_CAPACITY_MAX='${raw}' bukan bilangan positif; memakai ${PORT_API_CAPACITY_MAX_DEFAULT}." >&2
+            printf '%s' "$PORT_API_CAPACITY_MAX_DEFAULT"
+            return 0
+            ;;
+    esac
+    digits="$(strip_leading_zeros "$trimmed")"
+    if [ "${#digits}" -gt 5 ]; then
+        # Lebih besar dari lebar blok mana pun: pagar efektif = lebar blok.
+        printf '%s' "$PORT_API_BLOCK_WIDTH"
+        return 0
+    fi
+    if [ "$((10#$digits))" -le 0 ]; then
+        echo "[WARN] RM_API_CAPACITY_MAX='${raw}' bukan bilangan positif; memakai ${PORT_API_CAPACITY_MAX_DEFAULT}." >&2
+        printf '%s' "$PORT_API_CAPACITY_MAX_DEFAULT"
+        return 0
+    fi
+    printf '%s' "$((10#$digits))"
+}
+
+PORT_API_START="$(sanitize_api_port_start "${RM_API_API_PORT_START:-}")"
+PORT_API_CAPACITY_MAX="$(sanitize_capacity_max "${RM_API_CAPACITY_MAX:-}")"
+# >>> akhir konfigurasi blok port API (penanda untuk scripts/test-port-block.sh) <<<
 
 S3_REMOTE="ljns3"
 S3_BUCKET="backup-db"
@@ -203,11 +420,40 @@ unregister_port() {
     [ -f "$PORT_REGISTRY" ] && sed -i "/ # ${admin} /d" "$PORT_REGISTRY"
 }
 
+# api_port_fence_end mencetak batas ATAS (EKSKLUSIF) rentang port instance.
+# Dipakai bersama oleh penelusuran DAN pesan galatnya, supaya angka yang
+# dilaporkan ke operator selalu rentang EFEKTIF — bukan lebar blok mentah.
+# Melaporkan lebar mentah saat capacity_max kecil membuat operator memasang
+# aturan DSTNAT untuk port yang tak akan pernah dialokasikan.
+api_port_fence_end() {
+    local width=$PORT_API_BLOCK_WIDTH
+    local cap="${PORT_API_CAPACITY_MAX:-0}"
+    if [ "$cap" -gt 0 ] && [ "$cap" -lt "$width" ]; then
+        width=$cap
+    fi
+    local end=$((PORT_API_START + width))
+    if [ "$end" -gt 65536 ]; then
+        end=65536
+    fi
+    printf '%s' "$end"
+}
+
+# Penelusuran berhenti di ujung rentang milik mesin ini. Keluar rentang = port
+# yang tidak ikut di-DSTNAT concentrator — dan karena PORT_API_START = base+100,
+# 100 port di atas rentang itu MILIK VM TETANGGA (mulai persis di
+# RM_API_LISTEN-nya). Lebih baik gagal terang-terangan daripada menerbitkan
+# instance yang tak terjangkau atau yang URL-nya mendarat di VM yang keliru.
+#
+# Pagarnya identik dengan PortRegistry.APIPortEnd() di Go:
+#   PORT_API_START + min(PORT_API_BLOCK_WIDTH, PORT_API_CAPACITY_MAX)
 find_available_api_port() {
     local port=$PORT_API_START
+    local cap="${PORT_API_CAPACITY_MAX:-0}"
+    local end
+    end="$(api_port_fence_end)"
     touch "$PORT_REGISTRY"
 
-    while true; do
+    while [ "$port" -lt "$end" ]; do
         if grep -q "^${port} " "$PORT_REGISTRY" 2>/dev/null; then
             port=$((port + 1)); continue
         fi
@@ -217,6 +463,8 @@ find_available_api_port() {
         echo "$port"
         return 0
     done
+    echo "[ERROR] Rentang port API ${PORT_API_START}-$((end - 1)) habis (capacity_max=${cap}); tidak ada port kosong di dalam blok mesin ini." >&2
+    return 1
 }
 
 # ============================================
@@ -1132,7 +1380,10 @@ case "${1:-}" in
         ACCT_PORT=$((AUTH_PORT + 1))
         COA_PORT=$((AUTH_PORT + 2000))
         INNER_PORT=$((AUTH_PORT + 5000))
-        API_PORT=$(find_available_api_port)
+        if ! API_PORT=$(find_available_api_port); then
+            error "Tidak ada port API kosong di rentang ${PORT_API_START}-$(( $(api_port_fence_end) - 1 )) (capacity_max=${PORT_API_CAPACITY_MAX}). Instance TIDAK dibuat — memakai port di luar rentang membuatnya tak terjangkau backend."
+            exit 1
+        fi
 
         echo ""
         header "======================================================"

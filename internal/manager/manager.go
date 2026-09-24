@@ -73,6 +73,14 @@ type Config struct {
 	// PortRegistry path. If empty, derived from FreeRADIUSDir/.port_registry.
 	PortRegistryPath string
 
+	// APIPortStart / Listen hanya diumumkan lewat /v1/server/info; keduanya
+	// tidak mengubah perilaku alokasi (itu tugas Ports). Gunanya supaya ERP
+	// bisa MEMVERIFIKASI mesin ini benar-benar memakai blok port yang ia
+	// perintahkan lewat skrip pemasangan — kalau tidak, satu-satunya cara
+	// tahu blok yang keliru adalah menunggu instance yang tak bisa dihubungi.
+	APIPortStart int
+	Listen       string
+
 	// freeradius-api bootstrap (v0.2.0). When non-nil, CreateInstance
 	// will git-clone the template (once), copy it into APIDir, set up
 	// the Python venv, and write `.env` before starting the systemd unit.
@@ -121,6 +129,19 @@ func (i *impl) apiDirBase() string {
 		return "/root"
 	}
 	return i.cfg.APIDirBase
+}
+
+// apiPortStart mengembalikan awal blok port API yang berlaku di mesin ini.
+// Diambil dari Config, dengan registry port sebagai sumber cadangan supaya
+// angka yang diumumkan selalu sama dengan yang dipakai saat alokasi.
+func (i *impl) apiPortStart() int {
+	if i.cfg.APIPortStart > 0 {
+		return i.cfg.APIPortStart
+	}
+	if i.cfg.Ports != nil && i.cfg.Ports.APIPortStart > 0 {
+		return i.cfg.Ports.APIPortStart
+	}
+	return DefaultAPIPortStart
 }
 
 func (i *impl) apiPublishIP() string {

@@ -50,8 +50,37 @@ tidak pernah ditimpa saat install ulang):
 | Variabel | Kenapa penting |
 |---|---|
 | `RM_API_API_PUBLISH_IP` | Alamat yang **diumumkan ke backend**. Nilai ini tersimpan ke `radius_servers.url` setiap instance baru. Kosong → jatuh ke `0.0.0.0`, provisioning tetap "berhasil" tapi instance-nya tak bisa dihubungi siapa pun. Isi IP publik concentrator bila backend masuk lewat DSTNAT. |
-| `RM_API_LISTEN` | Alamat bind. Jangan diikat langsung ke IP tunnel — alamat itu baru ada setelah VPN naik, sehingga service gagal start saat boot. Pakai `0.0.0.0` + firewall. |
+| `RM_API_LISTEN` | Alamat bind. **Portnya bagian dari blok yang dialokasikan ERP** (= `base`, lihat di bawah). Jangan diikat langsung ke IP tunnel — alamat itu baru ada setelah VPN naik, sehingga service gagal start saat boot. Pakai `0.0.0.0` + firewall. |
 | `RM_API_CAPACITY_MAX` | Jumlah instance yang boleh hidup di mesin ini. Ikut menentukan rentang port yang perlu di-NAT di concentrator — kalau dinaikkan, paste ulang skrip concentrator-nya. |
+| `RM_API_API_PORT_START` | Awal blok port HTTP freeradius-api di mesin ini (naik satu-satu per instance). **Angkanya ditentukan ERP** — lihat di bawah. Di luar `1024–64000` atau bukan angka → ditolak, kembali ke bawaan `8100` dengan `WARN`; nilai efektifnya dicatat di log tiap service start dan diumumkan di `/v1/server/info`. |
+
+> **Blok portnya ditentukan ERP, jangan dikarang.** Satu VPN concentrator bisa
+> menaungi lebih dari satu VM RADIUS, dan backend menjangkau tiap VM lewat
+> DSTNAT di IP publik concentrator. NAT-nya 1:1 (tanpa `to-ports`) karena URL
+> instance yang diterbitkan RM-API sudah memuat nomor portnya sendiri. Karena
+> itu ERP yang mengalokasikan blok tiap VM:
+>
+> | | Nilai |
+> |---|---|
+> | `base` | `20000 + k*1000` (`k` = urutan VM di concentrator: 0, 1, 2, …) |
+> | `RM_API_LISTEN` | `base` → `20000`, `21000`, `22000`, … |
+> | `RM_API_API_PORT_START` | `base + 100` → `20100`, `21100`, `22100`, … |
+> | lebar blok VM | `1000` port — `[base, base+999]` |
+> | rentang port instance | `[base+100, base+999]` = **900** port (100 port pertama milik `RM_API_LISTEN` + kontrol) |
+>
+> **Satu-satunya sumber nilai yang benar** adalah skrip pemasangan yang
+> diterbitkan menu **Server RADIUS Manager → Setup Script** di ERP: skrip itu
+> mengisi `RM_API_LISTEN` + `RM_API_API_PORT_START` sesuai aturan DSTNAT yang
+> dipasang di concentrator. Mengisi angka lain (mis. `8100`) membuat instance
+> lahir di luar rentang yang di-NAT — provisioning tetap dilaporkan **berhasil**,
+> tapi permintaan backend mendarat di VM yang keliru atau tidak sampai sama
+> sekali, tanpa satu galat pun.
+>
+> Verifikasi blok yang benar-benar dipakai mesin ini lewat `/v1/server/info`
+> (field `listen` dan `api_port_start`).
+>
+> Port UDP RADIUS (10000–59000) tidak terpengaruh: lewat tunnel langsung, tidak
+> pernah di-NAT, jadi tidak pernah bertabrakan antar-VM.
 
 ```bash
 sudo nano /etc/radius-manager-api/env
@@ -97,9 +126,32 @@ Script utama untuk membuat, mengelola, dan menghapus instance FreeRADIUS beserta
 | `AUTH_PORT + 1` | RADIUS Accounting |
 | `AUTH_PORT + 2000` | CoA (Change of Authorization) |
 | `AUTH_PORT + 5000` | Inner Tunnel (EAP) |
-| `API_PORT` | REST API (mulai dari 8100) |
+| `API_PORT` | REST API (mulai dari `RM_API_API_PORT_START`, mis. `20100`; bawaan `8100` bila tidak diisi) |
 
 Port dipilih secara acak (range 10000–59000) dan dicek agar tidak bentrok dengan port yang sudah dipakai.
+
+`radius-manager.sh` dan `radius-manager-api` berbagi `.port_registry`, jadi blok
+port API-nya harus sama di satu mesin. Skrip ini **memuat sendiri**
+`/etc/radius-manager-api/env` kalau ada dan bisa dibaca, jadi cukup:
+
+```bash
+sudo bash radius-manager.sh create <nama>
+```
+
+Env yang sudah di-export di shell tetap menang atas isi berkas (berguna saat uji
+coba), dan nilai yang bukan angka atau di luar `1024–64000` diklem ke bawaan
+dengan peringatan — sama seperti sisi Go (termasuk `0020100` yang diterima dan
+`20 100` yang ditolak). Hanya kunci berawalan `RM_API_` yang diambil dari berkas
+itu, supaya kunci senama (`PORT_REGISTRY`, `DB_HOST`, …) tidak membajak skrip;
+berkas yang ADA tapi tak terbaca (0600 root, dijalankan non-root) memberi `WARN`
+alih-alih diam-diam memakai bawaan. Alokasi berhenti di
+`api_port_start + min(900, RM_API_CAPACITY_MAX)` — 900, bukan 1000, karena pagar
+selebar 1000 dari `base+100` merambah ke `[base+1000, base+1099]` yang MILIK VM
+TETANGGA (dimulai tepat di `RM_API_LISTEN`-nya): lebih baik
+gagal terang-terangan daripada menerbitkan instance di port yang tidak ikut
+di-DSTNAT atau yang mendarat di VM lain.
+
+Uji perilaku ini tanpa menyentuh sistem: `./scripts/test-port-block.sh`.
 
 ### File info instance
 

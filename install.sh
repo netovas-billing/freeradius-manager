@@ -54,6 +54,12 @@ USAGE
 
 ENVIRONMENT (defaults shown)
   RM_INSTALL_BIND=127.0.0.1:9000        Listen address baked into the systemd unit.
+      PERHATIAN: bawaan 127.0.0.1 hanya bisa dihubungi dari mesin ini sendiri.
+      Kalau backend menjangkau VM ini lewat DSTNAT concentrator (atau dari
+      jaringan lain), port 9000-nya TIDAK akan terjangkau — dan installer tetap
+      melapor hijau, karena self-test-nya menembak 127.0.0.1. Pakai:
+          sudo RM_INSTALL_BIND=0.0.0.0:9000 bash install.sh
+      lalu batasi aksesnya di firewall / hanya lewat tunnel.
   RM_INSTALL_REPO=...freeradius-manager.git  Source repo (curl|bash mode only).
   RM_INSTALL_BRANCH=master              Branch to clone.
   RM_INSTALL_DIR=/opt/freeradius-manager  Clone target.
@@ -241,15 +247,49 @@ else
 #   - backend satu jaringan dengan mesin ini       → IP privat mesin ini
 #RM_API_API_PUBLISH_IP=103.242.104.67
 
-# Alamat bind. Bawaan dari installer ada di unit; timpa di sini bila perlu.
+# Alamat bind. Portnya bagian dari blok yang dialokasikan ERP (= base, lihat
+# RM_API_API_PORT_START di bawah), jadi ambil dari skrip menu "Server RADIUS
+# Manager -> Setup Script" — bukan dikarang sendiri.
 # Mengikat langsung ke IP tunnel TIDAK disarankan: alamat itu baru ada setelah
 # VPN naik, sehingga service gagal start saat boot. Pakai 0.0.0.0 + firewall.
-#RM_API_LISTEN=0.0.0.0:9000
+#RM_API_LISTEN=0.0.0.0:20000
 
 # Jumlah instance FreeRADIUS yang boleh hidup di mesin ini. Angka ini juga
 # dipakai ERP untuk menghitung rentang port yang perlu di-NAT di concentrator
 # — kalau dinaikkan, paste ulang skrip concentrator-nya.
 #RM_API_CAPACITY_MAX=50
+
+# ── RM_API_API_PORT_START — ANGKANYA DITENTUKAN ERP, JANGAN DIKARANG ─────────
+# Awal blok port HTTP freeradius-api di mesin ini (naik satu-satu per instance).
+#
+# Satu VPN concentrator bisa menaungi LEBIH DARI SATU VM RADIUS, dan backend
+# menjangkau tiap VM lewat DSTNAT di IP publik concentrator. NAT-nya 1:1 (tanpa
+# to-ports) karena URL instance yang diterbitkan RM-API sudah memuat nomor
+# portnya sendiri.
+#
+# Karena itu ERP-lah yang mengalokasikan blok port tiap VM, dengan skema:
+#
+#   base = 20000 + k*1000     (k = urutan VM di concentrator: 0, 1, 2, ...)
+#   RM_API_LISTEN            = base          (mis. 20000, 21000, 22000)
+#   RM_API_API_PORT_START    = base + 100    (mis. 20100, 21100, 22100)
+#   lebar blok VM            = 1000 port  ([base, base+999])
+#   rentang port instance    = 900 port   ([base+100, base+999] - 100 port
+#                              pertama dipakai RM_API_LISTEN + kontrol)
+#
+# SATU-SATUNYA sumber nilai yang benar adalah skrip pemasangan yang diterbitkan
+# menu "Server RADIUS Manager -> Setup Script" di ERP — skrip itu sudah mengisi
+# RM_API_LISTEN dan RM_API_API_PORT_START sesuai aturan DSTNAT yang dipasang di
+# concentrator. Mengisi sendiri dengan angka lain (mis. 8100) membuat instance
+# lahir di luar rentang yang di-NAT: provisioning tetap dilaporkan BERHASIL,
+# permintaan backend mendarat di VM yang keliru atau tidak sampai sama sekali,
+# dan tidak ada galat yang kelihatan.
+#
+# Nilai bukan angka atau di luar 1024–64000 ditolak (kembali ke bawaan 8100)
+# dengan WARN di journalctl; nilai efektifnya dicatat tiap service start.
+#
+# Port UDP RADIUS (10000–59000) tidak terpengaruh: lewat tunnel langsung,
+# tidak pernah di-NAT.
+#RM_API_API_PORT_START=20100
 ENVEOF
     chmod 0600 "$ENV_FILE"
     ok "wrote $ENV_FILE (0600) - isi RM_API_API_PUBLISH_IP sebelum dipakai"
@@ -407,6 +447,13 @@ cat <<EOF
   Source           ${SOURCE_DIR}
   State dir        ${STATE_DIR}
   Audit log        ${LOG_DIR}/audit.log
+
+  Blok port mesin ini (RM_API_LISTEN + RM_API_API_PORT_START di ${ENV_FILE})
+  ditentukan ERP: base 20000 + k*1000, listen = base, api_port_start = base+100.
+  Ambil nilainya dari skrip menu "Server RADIUS Manager -> Setup Script" —
+  angka karangan sendiri tidak cocok dengan aturan DSTNAT di concentrator dan
+  membuat VM ini gagal diam-diam. Cek yang benar-benar dipakai lewat
+  /v1/server/info (field listen + api_port_start).
 
   Useful commands:
     sudo cat ${TOKEN_FILE}                                 # reveal API token

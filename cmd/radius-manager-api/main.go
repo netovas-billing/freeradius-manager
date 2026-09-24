@@ -80,6 +80,16 @@ Environment (read by 'serve'):
   RM_API_AUDIT_LOG         path for JSON-line audit log, default /var/log/radius-manager-api/audit.log
   RM_API_API_DIR_BASE      where per-instance freeradius-api dirs live, default /root
   RM_API_API_PUBLISH_IP    public IP advertised in WEB_API_URL (defaults to VPN_IP)
+  RM_API_API_PORT_START    first freeradius-api HTTP port on this machine (fallback 8100).
+                           The value is ASSIGNED BY THE ERP: every RADIUS VM behind the same
+                           VPN concentrator gets its own 1000-port block (base 20000 + k*1000,
+                           RM_API_LISTEN=base, RM_API_API_PORT_START=base+100) that matches the
+                           concentrator's DSTNAT rules - equal blocks collide and one VM fails
+                           silently. Instances may only use the 900 ports [base+100, base+999];
+                           the 100 ports above that belong to the NEXT VM (its RM_API_LISTEN).
+                           Do not invent the number: paste the script published by
+                           the "Server RADIUS Manager -> Setup Script" menu.
+                           Values outside 1024-64000 are ignored (default is used, with a WARN).
   RM_API_DB_DSN            MariaDB DSN for management (e.g. root@unix(/var/run/mysqld/mysqld.sock)/);
                            when unset, write operations return 501 Not Implemented (read-only mode)
   RM_API_BOOTSTRAP_REPO            git URL for the freeradius-api repo; when empty, v0.2.0
@@ -149,10 +159,49 @@ func runServe() error {
 		PortRegistryPath: filepath.Join(cfg.FreeRADIUSDir, ".port_registry"),
 		InstanceDBHost:   cfg.InstanceDBHost,
 		InstanceDBPort:   cfg.InstanceDBPort,
+		Listen:           cfg.Listen,
 	}
+	// Blok port API dihitung dan dicatat SELALU, termasuk saat mode read-only
+	// (db == nil). Kalau dua VM RADIUS di bawah satu concentrator memakai blok
+	// yang sama, aturan DSTNAT-nya bertabrakan dan salah satu VM gagal
+	// diam-diam — tanpa baris log ini tak ada jejak blok mana yang dipakai dan
+	// operator harus menebak-nebak lewat isi .port_registry.
+	ports := manager.NewPortRegistryWithAPIStart(managerCfg.PortRegistryPath, cfg.APIPortStart)
+	// Pagar atas alokasi: jangan sampai instance lahir di luar rentang port
+	// yang benar-benar di-NAT concentrator (ERP menghitung rentang itu dari
+	// CapacityMax).
+	ports.CapacityMax = cfg.CapacityMax
+	managerCfg.APIPortStart = ports.APIPortStart
+	// Yang dicatat adalah rentang EFEKTIF, bukan lebar blok mentah. Pagarnya
+	// = api_port_start + min(lebar blok, CapacityMax), jadi dengan
+	// capacity_max=50 alokasi berhenti di start+50 meski lebar bloknya 900.
+	// Mencetak "lebar_blok" sendirian membuat operator memasang aturan DSTNAT
+	// untuk ratusan port yang tak akan pernah dialokasikan — dan saat blok
+	// terasa "habis" lebih cepat dari yang dicatat, tak ada satu pun baris log
+	// yang menjelaskan kenapa.
+	apiPortEnd := ports.APIPortEnd()
+	logger.Info("blok port API freeradius-api",
+		slog.Int("api_port_start", ports.APIPortStart),
+		slog.Int("port_akhir", apiPortEnd-1),
+		slog.Int("jumlah_port_efektif", apiPortEnd-ports.APIPortStart),
+		slog.Int("lebar_blok_maks", ports.APIBlockWidth),
+		slog.Int("capacity_max", cfg.CapacityMax),
+	)
+	// "Diisi tapi ditolak" WAJIB berbunyi. Kalau hanya nilai != 0 yang diperiksa,
+	// salah ketik seperti "delapanribu" atau "0" jatuh ke bawaan tanpa sepatah
+	// peringatan pun, dan instance lahir di blok yang tidak di-DSTNAT.
+	if cfg.APIPortStartRaw != "" && ports.APIPortStart != cfg.APIPortStart {
+		logger.Warn("RM_API_API_PORT_START diabaikan (bukan angka atau di luar rentang wajar); memakai bawaan",
+			slog.String("nilai_mentah", cfg.APIPortStartRaw),
+			slog.Int("dipakai", ports.APIPortStart),
+			slog.Int("min", manager.MinAPIPortStart),
+			slog.Int("max", manager.MaxAPIPortStart),
+		)
+	}
+
 	if db != nil {
 		managerCfg.DB = &manager.DBManager{DB: db, AllowRemote: true}
-		managerCfg.Ports = manager.NewPortRegistry(managerCfg.PortRegistryPath)
+		managerCfg.Ports = ports
 		// Backend selection: production Linux uses real systemctl; the
 		// Docker dev image uses supervisord (no systemd in the container).
 		switch cfg.SystemdBackend {

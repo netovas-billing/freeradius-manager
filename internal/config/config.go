@@ -24,6 +24,30 @@ type Config struct {
 	APIPublishIP  string // RM_API_API_PUBLISH_IP, default $RM_API_VPN_IP or 0.0.0.0
 	DBDSN         string // RM_API_DB_DSN, MariaDB DSN for management user
 
+	// APIPortStart adalah awal blok port HTTP freeradius-api di mesin ini
+	// (RM_API_API_PORT_START; bawaan 8100 hanya jaring pengaman — nilai
+	// sebenarnya dialokasikan ERP: base 20000 + k*1000, api_port_start =
+	// base + 100). Harus BERBEDA antar VM RADIUS
+	// yang bernaung di satu VPN concentrator: backend masuk lewat DSTNAT 1:1
+	// di IP publik concentrator, jadi dua VM dengan blok port yang sama
+	// bertabrakan di aturan NAT — hanya satu yang terjangkau dan yang lain
+	// gagal diam-diam. Nilai harus cocok dengan aturan DSTNAT concentrator.
+	// Lihat manager.NewPortRegistryWithAPIStart.
+	//
+	// 0 = env tidak diisi ATAU isinya tidak terbaca sebagai angka → manager
+	// memakai bawaannya. Batas kewajaran nilainya juga ditegakkan di manager,
+	// supaya semua pemanggil ikut terlindungi, bukan cuma jalur env ini.
+	APIPortStart int
+
+	// APIPortStartRaw menyimpan isi RM_API_API_PORT_START apa adanya ("" kalau
+	// env memang tidak diisi). Gunanya membedakan "tidak diisi" dari "diisi
+	// tapi ditolak": tanpa pembeda ini, salah ketik seperti "delapanribu" atau
+	// "0" sama-sama jadi APIPortStart == 0, dipakai-bawaan TANPA peringatan,
+	// dan instance lahir di luar blok port yang di-DSTNAT concentrator —
+	// backend tidak pernah bisa menghubunginya dan tak ada galat di mana pun.
+	// main.go memakai field ini untuk memberi WARN beserta nilai mentahnya.
+	APIPortStartRaw string
+
 	// freeradius-api bootstrap (v0.2.0). When BootstrapAPIRepo is non-empty,
 	// CreateInstance runs the template-once + venv flow.
 	BootstrapAPIRepo     string // RM_API_BOOTSTRAP_REPO, e.g. https://github.com/heirro/freeradius-api
@@ -92,6 +116,18 @@ func Load() (*Config, error) {
 		S3Bucket:             os.Getenv("RM_API_S3_BUCKET"),
 		S3BackupRoot:         getenv("RM_API_S3_BACKUP_ROOT", "radiusdb"),
 	}
+	// Sengaja TIDAK mengembalikan error: nilai yang aneh cukup diabaikan dan
+	// mesin tetap naik dengan blok port bawaan. Tapi nilai mentahnya disimpan
+	// supaya start-up bisa memberi WARN — "diisi tapi ditolak" tidak boleh
+	// terlihat sama dengan "tidak diisi", karena bedanya adalah instance yang
+	// lahir di luar blok port yang di-NAT (gagal senyap) versus mesin yang
+	// memang sengaja memakai blok bawaan.
+	if raw := os.Getenv("RM_API_API_PORT_START"); strings.TrimSpace(raw) != "" {
+		c.APIPortStartRaw = raw
+		if n, ok := ParseAPIPortStart(raw); ok {
+			c.APIPortStart = n
+		}
+	}
 	dbPort := getenv("RM_API_INSTANCE_DB_PORT", "3306")
 	if n, err := strconv.Atoi(dbPort); err == nil && n > 0 {
 		c.InstanceDBPort = n
@@ -124,4 +160,49 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ParseAPIPortStart membaca isi RM_API_API_PORT_START dengan aturan yang SAMA
+// PERSIS dengan sanitize_api_port_start() di radius-manager.sh:
+//
+//  1. pangkas HANYA spasi di UJUNG (berkas env sering disunting tangan; satu
+//     spasi di belakang nilai bukan salah ketik yang berarti);
+//  2. sisanya harus digit semua — nol di depan boleh dan dibaca DESIMAL
+//     ("0020100" → 20100, bukan oktal);
+//  3. selain itu ditolak (ok=false), termasuk spasi di TENGAH ("20 100"),
+//     tanda "+"/"-", dan angka yang kepanjangan.
+//
+// Kenapa kedua sisi harus identik: skrip bash dan RM-API Go menulis SATU
+// .port_registry yang sama. Kalau satu sisi menerima nilai yang ditolak sisi
+// lain, mesin yang sama memakai DUA blok port berbeda — instance yang lahir
+// lewat jalur yang jatuh ke bawaan 8100 tidak ikut di-DSTNAT concentrator,
+// provisioning tetap "berhasil", dan backend tak pernah bisa menghubunginya.
+//
+// Rentang kewajaran (1024–64000) TIDAK diperiksa di sini: itu tugas
+// manager.NewPortRegistryWithAPIStart, supaya semua pemanggil ikut terlindungi.
+func ParseAPIPortStart(raw string) (int, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, false
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	// Buang nol di depan supaya "0020100" dan "20100" diperlakukan sama, lalu
+	// tolak yang kepanjangan sebelum dikonversi — angka raksasa tidak boleh
+	// mengandalkan perilaku overflow strconv.
+	stripped := strings.TrimLeft(trimmed, "0")
+	if stripped == "" {
+		stripped = "0"
+	}
+	if len(stripped) > 5 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(stripped)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }

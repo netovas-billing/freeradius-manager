@@ -100,6 +100,13 @@ type ServerInfo struct {
 	InstancesCount    int    `json:"instances_count"`
 	UptimeSeconds     int64  `json:"uptime_seconds"`
 	RMAPIVersion      string `json:"rm_api_version"`
+
+	// APIPortStart / Listen diumumkan supaya ERP bisa memverifikasi mesin ini
+	// memakai blok port yang ia perintahkan (base 20000 + k*1000; listen=base,
+	// api_port_start=base+100). Blok yang tidak cocok dengan aturan DSTNAT di
+	// concentrator membuat instance lahir "berhasil" tapi tak terjangkau.
+	APIPortStart int    `json:"api_port_start"`
+	Listen       string `json:"listen,omitempty"`
 }
 
 type Health struct {
