@@ -186,7 +186,9 @@ if [ "$MODE" = "uninstall" ]; then
   jalankan "ipsec down ${TUNNEL_NAME} 2>/dev/null || true"
   for f in "/etc/systemd/system/l2tp-${TUNNEL_NAME}.service" \
            "/etc/ppp/ip-up.d/00-vpn-routes" \
+           "/etc/ppp/ip-up.d/00-vpn-routes.sh" \
            "/etc/ppp/ip-down.d/00-vpn-routes" \
+           "/etc/ppp/ip-down.d/00-vpn-routes.sh" \
            "/etc/ppp/options.l2tpd.client" \
            "/etc/sysctl.d/99-vpn-tunnel.conf"; do
     [ -e "$f" ] && jalankan "rm -f '$f'" && ok "hapus $f"
@@ -408,13 +410,31 @@ exit 0
 EOF
 }
 
+# DUA NAMA, dan itu bukan kelebihan hati-hati.
+#
+# Dispatcher pppd tidak seragam soal berkas mana yang ia jalankan:
+#
+#   /etc/ppp/ip-up  versi Debian:  for f in /etc/ppp/ip-up.d/*.sh   → HANYA .sh
+#   varian lain:                   run-parts /etc/ppp/ip-up.d       → justru
+#                                  MELEWATI nama bertitik, jadi .sh diabaikan
+#
+# Memilih salah satu berarti bertaruh pada varian yang kebetulan terpasang.
+# Yang kalah taruhan gagal SENYAP: tunnel naik normal, route tak pernah
+# dipasang, dan NAS tak pernah bisa menjangkau RADIUS. Terjadi 24 Sep 2026 —
+# skrip menulis tanpa .sh, dispatcher-nya hanya membaca *.sh.
+#
+# Memasang keduanya aman: kalau sebuah dispatcher menjalankan dua-duanya,
+# `ip route add` yang kedua gagal dengan "File exists" dan sudah ditelan
+# `|| true`; begitu pula `del` yang kedua.
 if [ "$DRY_RUN" = 1 ]; then
-  printf '  [dry-run] tulis /etc/ppp/ip-up.d/00-vpn-routes dan ip-down.d/00-vpn-routes\n'
+  printf '  [dry-run] tulis ip-up.d/ip-down.d 00-vpn-routes (+ varian .sh)\n'
 else
-  BUAT_ROUTE_SCRIPT add > /etc/ppp/ip-up.d/00-vpn-routes
-  BUAT_ROUTE_SCRIPT del > /etc/ppp/ip-down.d/00-vpn-routes
-  chmod +x /etc/ppp/ip-up.d/00-vpn-routes /etc/ppp/ip-down.d/00-vpn-routes
-  ok "route otomatis terpasang untuk: $ROUTES_LIST"
+  for nama in 00-vpn-routes 00-vpn-routes.sh; do
+    BUAT_ROUTE_SCRIPT add > "/etc/ppp/ip-up.d/$nama"
+    BUAT_ROUTE_SCRIPT del > "/etc/ppp/ip-down.d/$nama"
+    chmod +x "/etc/ppp/ip-up.d/$nama" "/etc/ppp/ip-down.d/$nama"
+  done
+  ok "route otomatis terpasang untuk: $ROUTES_LIST (dua varian nama)"
 fi
 
 # ── 7. systemd: tunnel naik sendiri setelah reboot ──────────────────────────
@@ -529,9 +549,24 @@ fi
 
 if ip route | grep -q "$NAS_POOL_CIDR"; then
   ok "route ke $NAS_POOL_CIDR terpasang"
+elif [ -n "$IPTUN" ]; then
+  # Tunnel naik tapi route tak ada = hook ip-up tidak pernah dipanggil.
+  # Dipasang langsung supaya sesi ini bisa lanjut, lalu dikatakan apa adanya:
+  # menyuruh operator "restart dan coba lagi" tanpa memasang apa pun hanya
+  # memindahkan tebakan kepadanya.
+  warn "route ke $NAS_POOL_CIDR belum ada padahal tunnel naik — hook ip-up tak terpanggil."
+  if ip route add "$NAS_POOL_CIDR" dev "$IFACE" 2>/dev/null; then
+    ok "route dipasang langsung lewat $IFACE untuk sesi ini"
+    warn "Setelah reboot, hook yang memasangnya. Skrip ini menulis dua varian nama"
+    warn "(00-vpn-routes dan 00-vpn-routes.sh) karena dispatcher pppd berbeda-beda"
+    warn "soal mana yang ia jalankan. Kalau setelah reboot route tetap hilang,"
+    warn "periksa /etc/ppp/ip-up — ia mungkin memakai pola ketiga."
+  else
+    warn "gagal memasang route manual — cek: ip route add $NAS_POOL_CIDR dev $IFACE"
+    GAGAL=1
+  fi
 else
-  warn "route ke $NAS_POOL_CIDR BELUM ada — tunnel mungkin naik sebelum skrip route terpasang."
-  warn "  coba: systemctl restart l2tp-${TUNNEL_NAME}.service"
+  warn "route ke $NAS_POOL_CIDR BELUM ada dan tunnel juga belum naik."
   GAGAL=1
 fi
 

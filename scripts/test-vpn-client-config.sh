@@ -135,6 +135,32 @@ for u in "$U_NO" "$U_YES"; do
 done
 ok "kedua mode tetap mendial lewat l2tp-control"
 
+# ── 3c. Hook ip-up dipasang dengan DUA nama ──────────────────────────────
+# Dispatcher pppd tidak seragam: versi Debian menjalankan /etc/ppp/ip-up.d/*.sh
+# (hanya yang berakhiran .sh), sedangkan varian ber-run-parts justru MELEWATI
+# nama bertitik. Memilih satu nama berarti bertaruh pada varian yang kebetulan
+# terpasang — dan yang kalah taruhan gagal SENYAP: tunnel naik normal, route
+# tak pernah ada, NAS tak pernah menjangkau RADIUS.
+for d in ip-up ip-down; do
+  for n in 00-vpn-routes 00-vpn-routes.sh; do
+    if grep -q "/etc/ppp/$d.d/\$nama\"" "$SKRIP" || grep -q "$d.d/$n" "$SKRIP"; then
+      :
+    else
+      bad "hook $d.d/$n tidak dipasang"
+    fi
+  done
+done
+if grep -q 'for nama in 00-vpn-routes 00-vpn-routes.sh' "$SKRIP"; then
+  ok "hook ip-up/ip-down dipasang dengan kedua varian nama"
+else
+  bad "hook hanya dipasang dengan satu nama — separuh dispatcher pppd tak akan menjalankannya"
+fi
+if grep -q '00-vpn-routes.sh' <<<"$(sed -n '/MODE" = "uninstall"/,/^fi$/p' "$SKRIP")"; then
+  ok "uninstall ikut membersihkan varian .sh"
+else
+  bad "uninstall meninggalkan varian .sh — hook yatim tetap memasang route"
+fi
+
 # ── 4. Kegagalan xl2tpd harus MENUNJUKKAN sebabnya ───────────────────────
 if grep -q 'journalctl -u xl2tpd.service' "$SKRIP"; then
   ok "kegagalan start xl2tpd mencetak pesan aslinya dari journal"
