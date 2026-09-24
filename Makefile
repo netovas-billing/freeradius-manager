@@ -25,6 +25,9 @@ test: ## Run unit tests (no infra dependencies).
 test-port-block: ## Uji blok port API di radius-manager.sh (tanpa root/Docker).
 	./scripts/test-port-block.sh
 
+test-vpn-config: ## Uji berkas konfigurasi terbitan vpn-client-setup.sh (tanpa root).
+	./scripts/test-vpn-client-config.sh
+
 test-race: ## Run unit tests with the race detector.
 	$(GO) test -race ./...
 
@@ -83,6 +86,6 @@ clean: ## Remove build artifacts.
 	rm -rf bin
 	$(GO) clean -testcache
 
-.PHONY: help build test test-port-block test-race test-integration test-integration-compose vet \
+.PHONY: help build test test-port-block test-vpn-config test-race test-integration test-integration-compose vet \
         docker-up docker-down docker-clean docker-logs docker-shell docker-token docker-supervisor \
         e2e tidy fmt clean

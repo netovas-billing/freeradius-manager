@@ -111,7 +111,28 @@ for arg in "$@"; do
   esac
 done
 
-MARKER="# dikelola oleh vpn-client-setup.sh — jangan sunting tangan"
+# PENANDA berkas kelolaan skrip ini.
+#
+# Karakter komentarnya BERBEDA per format, dan ini bukan kerewelan: parser
+# xl2tpd hanya mengenal ';'. Baris berawalan '#' di xl2tpd.conf dibaca sebagai
+# DATA di luar section, dan xl2tpd menolak SELURUH berkas:
+#
+#   parse_config: line 1: data '# ...' occurs with no context
+#   init: Unable to load config file
+#
+# Akibatnya service gagal start, skrip berhenti di tengah (set -e), dan
+# operator melihat "Job for xl2tpd.service failed" tanpa sebab yang terlihat —
+# pesan parse-nya hanya ada di journal. Terjadi nyata 24 Sep 2026.
+#
+# Teksnya dipisah dari karakter komentarnya supaya pengenalan berkas kelolaan
+# (tulis_berkas) tetap cocok untuk KEDUA bentuk; kalau tidak, tiap kali skrip
+# dijalankan ia membuat .bak baru untuk berkas yang sebenarnya miliknya sendiri.
+#
+# ASCII saja — tanda pisah panjang sempat dipakai di sini dan tak ada parser
+# yang diuntungkan olehnya.
+MARKER_TEKS="dikelola oleh vpn-client-setup.sh - jangan sunting tangan"
+MARKER="# $MARKER_TEKS"
+MARKER_XL2TPD="; $MARKER_TEKS"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -128,7 +149,7 @@ jalankan() {
 tulis_berkas() {
   local path="$1" isi
   isi="$(cat)"
-  if [ -e "$path" ] && ! grep -qF "$MARKER" "$path" 2>/dev/null; then
+  if [ -e "$path" ] && ! grep -qF "$MARKER_TEKS" "$path" 2>/dev/null; then
     if [ "$DRY_RUN" = 1 ]; then
       printf '  [dry-run] backup %s -> %s.bak-%s\n' "$path" "$path" "$STAMP"
     else
@@ -285,7 +306,7 @@ fi
 # ── 4. xl2tpd ───────────────────────────────────────────────────────────────
 log "4/8 Menyetel xl2tpd"
 tulis_berkas /etc/xl2tpd/xl2tpd.conf <<EOF
-$MARKER
+$MARKER_XL2TPD
 [global]
 port = 1701
 
@@ -436,7 +457,18 @@ if [ "$USE_IPSEC" = yes ]; then
   jalankan "systemctl enable --now strongswan-starter.service >/dev/null 2>&1 || true"
   jalankan "systemctl restart strongswan-starter.service"
 fi
-jalankan "systemctl restart xl2tpd.service"
+# Kalau xl2tpd menolak start, sebabnya HAMPIR SELALU galat parsing config yang
+# hanya tercetak di journal — systemd sendiri cuma melaporkan status=1. Tanpa
+# baris di bawah, operator berhenti di "Job for xl2tpd.service failed" dan
+# harus menebak. Itu memakan beberapa putaran bolak-balik pada 24 Sep 2026.
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  [dry-run] systemctl restart xl2tpd.service\n'
+elif ! systemctl restart xl2tpd.service; then
+  warn "xl2tpd menolak start. Pesan aslinya:"
+  journalctl -u xl2tpd.service --no-pager -n 15 2>/dev/null \
+    | sed 's/^/      /' >&2 || true
+  die "xl2tpd gagal start — lihat pesan di atas (sering: galat parsing /etc/xl2tpd/xl2tpd.conf)"
+fi
 jalankan "systemctl enable l2tp-${TUNNEL_NAME}.service >/dev/null"
 jalankan "systemctl restart l2tp-${TUNNEL_NAME}.service"
 
