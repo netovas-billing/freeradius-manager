@@ -7,3 +7,8 @@
 # Editor
 *.swp
 *.swo
+
+# Konfigurasi dev per-mesin (IP LAN, alamat bind). Nilainya berbeda di tiap
+# laptop dan ikut tersimpan ke radius_servers.url, jadi jangan sampai
+# ter-commit — lihat .env.example.
+.env

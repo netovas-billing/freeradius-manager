@@ -53,20 +53,31 @@ services:
       # Bind 0.0.0.0 untuk dev — backend container (Docker bridge) + browser
       # dari LAN dua-duanya bisa akses. Production wajib pakai reverse proxy
       # + IP whitelist + token rotation.
-      - "9000:9000"
-      # FreeRADIUS auth/acct — bind 0.0.0.0 supaya NAS MikroTik dari LAN bisa hit.
-      - "1812:1812/udp"
-      - "1813:1813/udp"
+      #
+      # Bisa dipersempit lewat .env: RM_DEV_BIND=127.0.0.1 (mis. saat laptop
+      # sedang di jaringan publik). Default tetap 0.0.0.0 supaya alur
+      # end-to-end backend→RM-API dan NAS→RADIUS bisa diuji apa adanya.
+      - "${RM_DEV_BIND:-0.0.0.0}:9000:9000"
+      # FreeRADIUS auth/acct — supaya NAS MikroTik dari LAN bisa hit.
+      - "${RM_DEV_BIND:-0.0.0.0}:1812:1812/udp"
+      - "${RM_DEV_BIND:-0.0.0.0}:1813:1813/udp"
       # Per-instance freeradius-api processes — port range untuk multi-tenant.
-      - "8100-8200:8100-8200"
+      - "${RM_DEV_BIND:-0.0.0.0}:8100-8200:8100-8200"
     environment:
       # rm-api itself
       RM_API_LISTEN: "0.0.0.0:9000"
       RM_API_LOG_FORMAT: "text"
       # IP yang ditulis ke radius_servers.url saat instance baru dibuat.
-      # Pakai LAN IP host supaya backend container (di Docker bridge) bisa
-      # reach via 192.168.200.189:<port>. Localhost binding bikin URL salah.
-      RM_API_API_PUBLISH_IP: "192.168.200.189"
+      #
+      # JANGAN di-hardcode ke IP satu mesin: nilai ini ikut tersimpan di
+      # radius_servers.url, jadi di laptop lain (atau setelah lease DHCP
+      # berganti) instance yang baru dibuat menunjuk alamat yang tidak ada —
+      # provisioning "berhasil" tapi backend tak pernah bisa menghubunginya.
+      #
+      # Default 127.0.0.1 benar saat semuanya jalan di host yang sama. Untuk
+      # alur backend-di-Docker atau NAS-dari-LAN, set di .env:
+      #   RM_DEV_PUBLISH_IP=192.168.200.189   (IP LAN laptop Anda)
+      RM_API_API_PUBLISH_IP: "${RM_DEV_PUBLISH_IP:-127.0.0.1}"
       RM_API_SYSTEMD_BACKEND: "supervisord"
 
       # MariaDB connection (entrypoint composes RM_API_DB_DSN from these).
