@@ -510,7 +510,20 @@ IPTUN="$(ip -o -4 addr show dev "${IFACE:-ppp0}" 2>/dev/null | awk '{print $4}' 
 if [ -n "$IPTUN" ]; then
   ok "tunnel naik di $IFACE dengan IP $IPTUN"
 else
-  warn "interface ppp belum ada — cek: journalctl -t xl2tpd -n 50 ; cek /etc/ppp/chap-secrets"
+  # Kegagalan ketiga hari ini yang bisu (24 Sep 2026), dan pola yang sama:
+  # pesan sesungguhnya ada di log pppd/xl2tpd, bukan di sini. Menyuruh operator
+  # mencarinya sendiri sudah terbukti memakan beberapa putaran bolak-balik, jadi
+  # dicetakkan langsung.
+  warn "interface ppp belum ada — tunnel tidak naik. Pesan terakhir pppd/xl2tpd:"
+  journalctl -t pppd -t xl2tpd --no-pager -n 25 2>/dev/null \
+    | sed 's/^/      /' >&2 || true
+  warn "Arti yang paling sering:"
+  warn "  'Serial connection established' lalu putus  → PPP secret di concentrator"
+  warn "                                                belum dipaste, atau namanya beda"
+  warn "  'MS-CHAP authentication failed' / 'Peer refused' → VPN_PASS tidak cocok"
+  warn "  'Maximum retries exceeded' / sunyi             → UDP 1701 ke $VPN_HOST tak sampai"
+  warn "  tak ada baris sama sekali                      → dial belum pernah dipicu;"
+  warn "                                                   coba: systemctl restart l2tp-${TUNNEL_NAME}.service"
   GAGAL=1
 fi
 
