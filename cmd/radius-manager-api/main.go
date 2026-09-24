@@ -127,7 +127,14 @@ func runServe() error {
 	// Optional DB (nil → manager runs in read-only mode).
 	var db *sql.DB
 	if cfg.DBDSN != "" {
-		db, err = sql.Open("mysql", cfg.DBDSN)
+		// Skema FreeRADIUS diterapkan sebagai satu berkas berisi belasan
+		// CREATE TABLE, jadi koneksi ini WAJIB mengizinkan banyak statement.
+		// Lihat config.NormalisasiDSN untuk galat yang timbul tanpa itu.
+		dsn, derr := config.NormalisasiDSN(cfg.DBDSN)
+		if derr != nil {
+			return derr
+		}
+		db, err = sql.Open("mysql", dsn)
 		if err != nil {
 			return fmt.Errorf("open db: %w", err)
 		}
