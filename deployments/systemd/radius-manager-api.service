@@ -32,8 +32,13 @@ EnvironmentFile=-/etc/radius-manager-api/env
 
 # Hardening
 NoNewPrivileges=yes
+# Lihat penjelasan panjang di install.sh: service ini BEKERJA dengan menulis
+# konfigurasi sistem, dan tiga lokasinya persis yang ditutup setelan bawaan
+# (/etc/freeradius, /etc/systemd/system, dan /root sebagai RM_API_API_DIR_BASE).
+# /usr dan /boot tetap read-only — itu yang sesungguhnya ingin dijaga.
 ProtectSystem=full
-ProtectHome=yes
+ReadWritePaths=/etc/freeradius /etc/systemd/system
+ProtectHome=no
 PrivateTmp=yes
 
 [Install]

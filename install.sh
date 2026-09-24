@@ -377,10 +377,30 @@ Environment="RM_API_CAPACITY_MAX=50"
 # Tanda "-" = berkasnya boleh tidak ada (service tetap start).
 EnvironmentFile=-${ENV_FILE}
 
-# Hardening - same set the source unit ships with.
+# Hardening.
+#
+# Pengecualian di bawah BUKAN pelonggaran asal-asalan: seluruh pekerjaan
+# service ini adalah menulis konfigurasi sistem, dan tiga lokasinya persis
+# yang ditutup oleh setelan bawaan.
+#
+#   /etc/freeradius     registry port, virtual server, metadata instance
+#   /etc/systemd/system unit timer maintenance per-instance
+#   /root               direktori instance freeradius-api
+#                       (RM_API_API_DIR_BASE; bawaannya sama dengan
+#                       radius-manager.sh supaya kedua alokator melihat
+#                       state yang sama)
+#
+# ProtectSystem=full menjadikan /etc read-only dan ProtectHome=yes membuat
+# /root tak terjangkau, jadi tanpa ini pembuatan instance gagal dengan
+# "read-only file system". Dan gagalnya baru muncul saat instance PERTAMA
+# dibuat — jauh sesudah pemasangan dinyatakan sukses, health 200, dan semua
+# fase installer hijau. Terjadi nyata 24 Sep 2026.
+#
+# /usr dan /boot tetap read-only; itu yang sesungguhnya ingin dijaga.
 NoNewPrivileges=yes
 ProtectSystem=full
-ProtectHome=yes
+ReadWritePaths=/etc/freeradius /etc/systemd/system
+ProtectHome=no
 PrivateTmp=yes
 
 [Install]
