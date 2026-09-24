@@ -420,20 +420,23 @@ fi
 # ── 7. systemd: tunnel naik sendiri setelah reboot ──────────────────────────
 log "7/8 Memasang unit systemd (tunnel naik lagi setelah reboot)"
 if [ "$USE_IPSEC" = yes ]; then
+  [ -x /usr/sbin/ipsec ] || die "USE_IPSEC=yes tapi /usr/sbin/ipsec tidak ada — pasang strongswan-starter dulu"
   UNIT_AFTER="network-online.target strongswan-starter.service xl2tpd.service"
   UNIT_REQ="Requires=strongswan-starter.service xl2tpd.service"
-  UNIT_START="$UNIT_START"
-  UNIT_STOPPOST="$UNIT_STOPPOST"
+  DESK_IPSEC="/IPsec"
+  UNIT_START="ExecStart=/usr/sbin/ipsec up $TUNNEL_NAME"
+  UNIT_STOPPOST="ExecStopPost=/usr/sbin/ipsec down $TUNNEL_NAME"
 else
   # Tanpa IPsec tak ada yang perlu dinaikkan lebih dulu; xl2tpd yang mendial.
   UNIT_AFTER="network-online.target xl2tpd.service"
   UNIT_REQ="Requires=xl2tpd.service"
+  DESK_IPSEC=" (tanpa IPsec)"
   UNIT_START="ExecStart=/bin/true"
   UNIT_STOPPOST=""
 fi
 tulis_berkas "/etc/systemd/system/l2tp-${TUNNEL_NAME}.service" <<EOF
 [Unit]
-Description=Tunnel L2TP/IPsec ke VPN concentrator ($VPN_HOST)
+Description=Tunnel L2TP${DESK_IPSEC} ke VPN concentrator ($VPN_HOST)
 Documentation=vpn-client-setup.sh
 After=$UNIT_AFTER
 Wants=network-online.target
@@ -443,10 +446,10 @@ $UNIT_REQ
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/sbin/ipsec up $TUNNEL_NAME
+$UNIT_START
 ExecStartPost=/bin/bash -c 'sleep 3 && echo "c $TUNNEL_NAME" > /var/run/xl2tpd/l2tp-control'
 ExecStop=/bin/bash -c 'echo "d $TUNNEL_NAME" > /var/run/xl2tpd/l2tp-control'
-ExecStopPost=/usr/sbin/ipsec down $TUNNEL_NAME
+$UNIT_STOPPOST
 
 [Install]
 WantedBy=multi-user.target
@@ -470,7 +473,17 @@ elif ! systemctl restart xl2tpd.service; then
   die "xl2tpd gagal start — lihat pesan di atas (sering: galat parsing /etc/xl2tpd/xl2tpd.conf)"
 fi
 jalankan "systemctl enable l2tp-${TUNNEL_NAME}.service >/dev/null"
-jalankan "systemctl restart l2tp-${TUNNEL_NAME}.service"
+# Sama alasannya dengan blok xl2tpd di atas: unit ini gagal dengan pesan yang
+# hanya ada di journal-nya sendiri. Membiarkannya bisu berarti operator cuma
+# melihat "Job for ... failed" dan harus menebak.
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  [dry-run] systemctl restart l2tp-%s.service\n' "$TUNNEL_NAME"
+elif ! systemctl restart "l2tp-${TUNNEL_NAME}.service"; then
+  warn "unit tunnel menolak start. Pesan aslinya:"
+  journalctl -u "l2tp-${TUNNEL_NAME}.service" --no-pager -n 15 2>/dev/null \
+    | sed 's/^/      /' >&2 || true
+  die "unit tunnel gagal start — lihat pesan di atas"
+fi
 
 # ── 8. Verifikasi ───────────────────────────────────────────────────────────
 log "8/8 Verifikasi"

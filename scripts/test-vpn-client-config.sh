@@ -89,11 +89,62 @@ else
   printf '[lewat] xl2tpd tidak terpasang — uji parser dilewati\n'
 fi
 
+# ── 3b. Unit systemd harus mengikuti mode IPsec ──────────────────────────
+# Template-nya sempat meng-HARDCODE `ExecStart=/usr/sbin/ipsec up`, padahal
+# dengan USE_IPSEC=no strongswan tidak dipasang sama sekali. Unit-nya gagal
+# start karena berkasnya tak ada, dan ExecStartPost — satu-satunya baris yang
+# BENAR-BENAR mendial tunnel — tak pernah dijalankan.
+unit_untuk() { # unit_untuk <yes|no>
+  local mode="$1" after req start stoppost desk
+  if [ "$mode" = yes ]; then
+    after="network-online.target strongswan-starter.service xl2tpd.service"
+    req="Requires=strongswan-starter.service xl2tpd.service"
+    start="ExecStart=/usr/sbin/ipsec up $TUNNEL_NAME"
+    stoppost="ExecStopPost=/usr/sbin/ipsec down $TUNNEL_NAME"
+    desk="/IPsec"
+  else
+    after="network-online.target xl2tpd.service"
+    req="Requires=xl2tpd.service"
+    start="ExecStart=/bin/true"
+    stoppost=""
+    desk=" (tanpa IPsec)"
+  fi
+  UNIT_AFTER="$after" UNIT_REQ="$req" UNIT_START="$start" \
+  UNIT_STOPPOST="$stoppost" DESK_IPSEC="$desk" \
+  TUNNEL_NAME="$TUNNEL_NAME" VPN_HOST="$VPN_HOST" \
+  bash -c 'eval "cat <<XEOF
+$(awk "/^tulis_berkas \"\/etc\/systemd/{a=1;next} a&&/^EOF\$/{exit} a" '"$SKRIP"')
+XEOF"'
+}
+
+U_NO=$(unit_untuk no)
+U_YES=$(unit_untuk yes)
+
+if grep -q '/usr/sbin/ipsec' <<<"$U_NO"; then
+  bad "unit mode TANPA IPsec masih memanggil /usr/sbin/ipsec — berkasnya tak dipasang, unit pasti gagal"
+else
+  ok "unit mode tanpa IPsec tidak menyentuh /usr/sbin/ipsec"
+fi
+if grep -q 'ExecStart=/usr/sbin/ipsec up' <<<"$U_YES"; then
+  ok "unit mode IPsec tetap menaikkan terowongan IPsec"
+else
+  bad "unit mode IPsec kehilangan 'ipsec up'"
+fi
+for u in "$U_NO" "$U_YES"; do
+  grep -q 'l2tp-control' <<<"$u" || bad "unit kehilangan ExecStartPost — tak ada yang mendial tunnel"
+done
+ok "kedua mode tetap mendial lewat l2tp-control"
+
 # ── 4. Kegagalan xl2tpd harus MENUNJUKKAN sebabnya ───────────────────────
 if grep -q 'journalctl -u xl2tpd.service' "$SKRIP"; then
   ok "kegagalan start xl2tpd mencetak pesan aslinya dari journal"
 else
   bad "kegagalan start xl2tpd tidak mencetak sebabnya — operator harus menebak"
+fi
+if grep -q 'journalctl -u "l2tp-\${TUNNEL_NAME}.service"' "$SKRIP"; then
+  ok "kegagalan start unit tunnel juga mencetak pesan aslinya"
+else
+  bad "kegagalan unit tunnel masih bisu"
 fi
 
 echo
