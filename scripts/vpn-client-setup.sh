@@ -42,7 +42,14 @@
 #        NAS_POOL_CIDR=172.31.199.0/24 \
 #        bash vpn-client-setup.sh
 #
+#   Concentrator yang L2TP server-nya TANPA IPsec (bawaan skrip ERP saat ini):
+#   sudo USE_IPSEC=no \
+#        VPN_HOST=103.242.104.67 VPN_USER=radius-utama-3f9c1a VPN_PASS='…' \
+#        NAS_POOL_CIDR=172.31.199.0/24 \
+#        bash vpn-client-setup.sh
+#
 #   Pilihan lain:
+#     USE_IPSEC=no  concentrator tidak menuntut IPsec (paket TIDAK terenkripsi)
 #     --dry-run     tampilkan yang akan dikerjakan, tanpa mengubah apa pun
 #     --uninstall   lepas tunnel + hapus berkas yang dibuat skrip ini
 #     --status      periksa keadaan tunnel sekarang lalu keluar
@@ -53,9 +60,15 @@
 #       remote-address=pool-radius change-tcp-mss=yes use-encryption=yes
 #   /ppp secret add name=<VPN_USER> password=<VPN_PASS> service=l2tp \
 #       profile=profile-radius
-#   /interface l2tp-server server set enabled=yes use-ipsec=required \
+#   # HANYA bila memakai IPsec. `use-ipsec=yes` (bukan `required`) supaya klien
+#   # lama yang TANPA IPsec — termasuk seluruh NAS yang dibuat skrip ERP — tetap
+#   # bisa menyambung. `required` akan memutus mereka semua sekaligus.
+#   /interface l2tp-server server set enabled=yes use-ipsec=yes \
 #       ipsec-secret=<VPN_PSK> default-profile=default-encryption \
 #       authentication=mschap2
+#
+#   VPN_USER harus PERSIS nama PPP secret yang dibuat skrip "RADIUS di dalam
+#   VPN" dari ERP (mis. radius-utama-3f9c1a) — bukan nama karangan sendiri.
 #   # izinkan trafik pool <-> pool (NAS <-> RADIUS) di chain forward
 #
 set -euo pipefail
@@ -70,6 +83,20 @@ EXTRA_ROUTES="${EXTRA_ROUTES:-}"            # CIDR tambahan, dipisah koma
 TUNNEL_NAME="${TUNNEL_NAME:-vpn-mikrotik}"  # nama conn ipsec + LAC xl2tpd
 MTU="${MTU:-1450}"
 PEER_NET="${PEER_NET:-$NAS_POOL_CIDR}"      # rentang IP peer yang sah (untuk saringan ip-up)
+
+# USE_IPSEC — concentrator ini menuntut IPsec atau tidak.
+#
+# PERIKSA DULU SEBELUM MENJALANKAN. Skrip concentrator yang diterbitkan ERP
+# mengaktifkan L2TP server TANPA IPsec (`/interface l2tp-server server set
+# enabled=yes default-profile=... authentication=mschap2`), dan klien NAS yang
+# dibuatnya juga tanpa IPsec. Kalau concentrator Anda masih seperti itu,
+# memaksa IPsec di sisi ini membuat `ipsec up` gagal dan tunnel tak pernah naik.
+#
+# USE_IPSEC=no → L2TP polos: paket TIDAK terenkripsi, hanya ter-enkapsulasi.
+# Untuk lalu lintas RADIUS itu berarti password pelanggan (yang cuma
+# di-obfuscate MD5) dan seluruh accounting lewat apa adanya. Pakai hanya bila
+# jalur antara kedua mesin memang tepercaya.
+USE_IPSEC="${USE_IPSEC:-yes}"
 
 DRY_RUN=0
 MODE="install"
@@ -149,9 +176,19 @@ if [ "$MODE" = "uninstall" ]; then
   exit 0
 fi
 
-for v in VPN_HOST VPN_USER VPN_PASS VPN_PSK NAS_POOL_CIDR; do
+case "$USE_IPSEC" in
+  yes|no) : ;;
+  *) die "USE_IPSEC harus 'yes' atau 'no' (dapat: $USE_IPSEC)" ;;
+esac
+
+WAJIB="VPN_HOST VPN_USER VPN_PASS NAS_POOL_CIDR"
+[ "$USE_IPSEC" = yes ] && WAJIB="$WAJIB VPN_PSK"
+for v in $WAJIB; do
   [ -n "${!v}" ] || die "$v wajib diisi. Lihat contoh di header skrip (--help)."
 done
+if [ "$USE_IPSEC" = no ]; then
+  warn "USE_IPSEC=no — trafik TIDAK terenkripsi, hanya ter-enkapsulasi L2TP."
+fi
 
 # Validasi bentuk CIDR sejak awal: salah ketik di sini berakhir sebagai
 # "tunnel naik tapi tidak bisa ping" yang jauh lebih mahal ditelusuri.
@@ -167,13 +204,15 @@ cat <<RINGKAS
   Pool NAS     : $NAS_POOL_CIDR   (route dipasang ke sini lewat tunnel)
   Route ekstra : ${EXTRA_ROUTES:-(tidak ada)}
   Nama tunnel  : $TUNNEL_NAME
+  IPsec        : $USE_IPSEC
   MTU/MRU      : $MTU
 RINGKAS
 [ "$DRY_RUN" = 1 ] && warn "MODE DRY-RUN — tidak ada yang diubah"
 
 # ── 1. Paket ────────────────────────────────────────────────────────────────
 log "1/8 Memasang paket"
-PAKET="strongswan strongswan-starter libcharon-extra-plugins xl2tpd ppp"
+PAKET="xl2tpd ppp"
+[ "$USE_IPSEC" = yes ] && PAKET="strongswan strongswan-starter libcharon-extra-plugins $PAKET"
 if [ "$DRY_RUN" = 1 ]; then
   printf '  [dry-run] apt-get install -y %s\n' "$PAKET"
 else
@@ -186,9 +225,13 @@ else
     # shellcheck disable=SC2086
     apt-get install -y -qq --fix-missing $PAKET >/dev/null
   }
-  command -v ipsec >/dev/null \
-    || die "perintah 'ipsec' tetap tidak ada — pastikan paket strongswan-starter terpasang."
-  ok "paket siap ($(ipsec --version 2>/dev/null | head -1))"
+  if [ "$USE_IPSEC" = yes ]; then
+    command -v ipsec >/dev/null \
+      || die "perintah 'ipsec' tetap tidak ada — pastikan paket strongswan-starter terpasang."
+    ok "paket siap ($(ipsec --version 2>/dev/null | head -1))"
+  else
+    ok "paket siap (tanpa IPsec)"
+  fi
 fi
 
 # ── 2. sysctl ───────────────────────────────────────────────────────────────
@@ -205,6 +248,9 @@ jalankan "sysctl --system >/dev/null"
 
 # ── 3. IPsec ────────────────────────────────────────────────────────────────
 log "3/8 Menyetel IPsec (strongSwan, mode transport untuk L2TP)"
+if [ "$USE_IPSEC" = no ]; then
+  ok "dilewati (USE_IPSEC=no)"
+else
 tulis_berkas /etc/ipsec.conf <<EOF
 $MARKER
 config setup
@@ -234,6 +280,7 @@ $MARKER
 $VPN_HOST %any : PSK "$VPN_PSK"
 EOF
 jalankan "chmod 600 /etc/ipsec.secrets"
+fi
 
 # ── 4. xl2tpd ───────────────────────────────────────────────────────────────
 log "4/8 Menyetel xl2tpd"
@@ -351,13 +398,25 @@ fi
 
 # ── 7. systemd: tunnel naik sendiri setelah reboot ──────────────────────────
 log "7/8 Memasang unit systemd (tunnel naik lagi setelah reboot)"
+if [ "$USE_IPSEC" = yes ]; then
+  UNIT_AFTER="network-online.target strongswan-starter.service xl2tpd.service"
+  UNIT_REQ="Requires=strongswan-starter.service xl2tpd.service"
+  UNIT_START="$UNIT_START"
+  UNIT_STOPPOST="$UNIT_STOPPOST"
+else
+  # Tanpa IPsec tak ada yang perlu dinaikkan lebih dulu; xl2tpd yang mendial.
+  UNIT_AFTER="network-online.target xl2tpd.service"
+  UNIT_REQ="Requires=xl2tpd.service"
+  UNIT_START="ExecStart=/bin/true"
+  UNIT_STOPPOST=""
+fi
 tulis_berkas "/etc/systemd/system/l2tp-${TUNNEL_NAME}.service" <<EOF
 [Unit]
 Description=Tunnel L2TP/IPsec ke VPN concentrator ($VPN_HOST)
 Documentation=vpn-client-setup.sh
-After=network-online.target strongswan-starter.service xl2tpd.service
+After=$UNIT_AFTER
 Wants=network-online.target
-Requires=strongswan-starter.service xl2tpd.service
+$UNIT_REQ
 
 [Service]
 Type=oneshot
@@ -373,8 +432,10 @@ WantedBy=multi-user.target
 EOF
 
 jalankan "systemctl daemon-reload"
-jalankan "systemctl enable --now strongswan-starter.service >/dev/null 2>&1 || true"
-jalankan "systemctl restart strongswan-starter.service"
+if [ "$USE_IPSEC" = yes ]; then
+  jalankan "systemctl enable --now strongswan-starter.service >/dev/null 2>&1 || true"
+  jalankan "systemctl restart strongswan-starter.service"
+fi
 jalankan "systemctl restart xl2tpd.service"
 jalankan "systemctl enable l2tp-${TUNNEL_NAME}.service >/dev/null"
 jalankan "systemctl restart l2tp-${TUNNEL_NAME}.service"
@@ -389,7 +450,9 @@ fi
 sleep 8
 GAGAL=0
 
-if ipsec status 2>/dev/null | grep -q "$TUNNEL_NAME.*ESTABLISHED"; then
+if [ "$USE_IPSEC" = no ]; then
+  ok "IPsec dilewati (USE_IPSEC=no)"
+elif ipsec status 2>/dev/null | grep -q "$TUNNEL_NAME.*ESTABLISHED"; then
   ok "IPsec ESTABLISHED"
 else
   warn "IPsec belum ESTABLISHED — cek: journalctl -u strongswan-starter -n 50"
