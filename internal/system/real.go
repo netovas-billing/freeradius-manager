@@ -349,6 +349,9 @@ func (p *RealPython) PipInstall(ctx context.Context, venvDir, requirementsFile s
 
 // RealGo menjalankan toolchain Go yang sudah dipasang install.sh di
 // /usr/local/go (lihat install.sh: unduh + ekstrak + tambah ke PATH).
+// goCacheDir — cache build bersama untuk semua instance di satu mesin.
+const goCacheDir = "/var/cache/radius-manager-api/go-build"
+
 type RealGo struct {
 	Bin string // default: cari /usr/local/go/bin/go lalu "go" di PATH
 }
@@ -375,13 +378,20 @@ func (g *RealGo) bin() string {
 // dl-cdn.alpinelinux.org padahal Docker Hub jalan), dan menarik modul saat
 // provisioning juga berarti dua instance bisa menjalankan kode berbeda.
 func (g *RealGo) Build(ctx context.Context, pkgDir, outBin string) error {
+	// Cache dibuat EKSPLISIT. Tanpa ini `go build` mati dengan "failed to
+	// initialize build cache ...: permission denied", dan itu terjadi SESUDAH
+	// template ter-clone — gejalanya "template ada tapi binernya tidak".
+	cacheDir := goCacheDir
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return fmt.Errorf("buat cache build %s: %w", cacheDir, err)
+	}
 	cmd := exec.CommandContext(ctx, g.bin(), "build", "-mod=vendor", "-o", outBin, ".")
 	cmd.Dir = pkgDir
 	cmd.Env = append(os.Environ(),
 		"GOPROXY=off",
 		"GOFLAGS=-mod=vendor",
 		// HOME kadang tak diset di konteks systemd, dan go butuh cache.
-		"GOCACHE=/var/cache/radius-manager-api/go-build",
+		"GOCACHE="+cacheDir,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

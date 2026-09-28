@@ -47,12 +47,15 @@ func paramsUji() SetupInstanceParams {
 	}
 }
 
-// BAWAAN TIDAK MENGUBAH APA PUN.
+// Jalur PYTHON masih utuh dan bisa dipilih.
 //
-// Ini kendala keras pemilik: instance yang sudah berjalan dengan Python tidak
-// boleh terpengaruh. Tanpa menyetel RM_API_RUNTIME, jalurnya harus tetap
-// Python — venv dibuat, pip dipanggil, .env bentuk Python.
-func TestBawaanTetapPython(t *testing.T) {
+// PERHATIAN soal nama: ini BUKAN menguji bawaan. Bawaan runtime datang dari
+// config (RM_API_RUNTIME, kini "go" — lihat config.TestAPIRuntime_BawaanGo);
+// yang diuji di sini adalah bahwa field Runtime yang kosong atau bernilai
+// "python" tetap menempuh jalur Python utuh: venv dibuat, pip dipanggil, .env
+// bentuk Python. Itu jalan keluar kalau runtime Go bermasalah di satu mesin,
+// dan ia harus tetap bekerja meski bawaannya sudah berpindah.
+func TestJalurPythonMasihUtuh(t *testing.T) {
 	for _, nilai := range []string{"", "python", "PYTHON", "  python  "} {
 		b, _, py, gо, fs := bootstrapGo()
 		b.Runtime = nilai

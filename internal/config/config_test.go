@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/netovas-billing/freeradius-manager/internal/manager"
@@ -159,5 +160,58 @@ func TestParseAPIPortStart(t *testing.T) {
 					tc.raw, got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+// Bawaan runtime freeradius-api = "go".
+//
+// Ini bukan preferensi gaya: permintaannya adalah instance BARU memakai Go.
+// Sebelumnya bawaannya "python" sehingga `create` tetap memasang aplikasi Python
+// dan sakelar Go tak pernah terpakai oleh siapa pun yang tidak menyetel env —
+// yaitu semua orang. Kalau baris ini berbalik, gejalanya persis itu lagi:
+// tak ada galat, semuanya "berhasil", tapi yang terpasang Python.
+func TestAPIRuntime_BawaanGo(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_RUNTIME", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIRuntime != "go" {
+		t.Fatalf("bawaan RM_API_RUNTIME harus \"go\", dapat %q", c.APIRuntime)
+	}
+}
+
+// Dan jalan keluarnya harus tetap ada: satu mesin boleh dipaksa kembali ke
+// Python tanpa menyunting kode.
+func TestAPIRuntime_BisaDipaksaPython(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_RUNTIME", "python")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIRuntime != "python" {
+		t.Fatalf("RM_API_RUNTIME=python tidak dihormati: %q", c.APIRuntime)
+	}
+}
+
+// Repo Go WAJIB punya bawaan.
+//
+// Bawaan runtime kini "go", dan EnsureTemplate gagal keras kalau repo-nya kosong
+// — jadi tanpa bawaan di sini, setiap `create` di mesin yang tidak menyetel
+// RM_API_GO_REPO akan gagal total.
+func TestBootstrapGoRepo_AdaBawaannya(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_GO_REPO", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BootstrapGoRepo == "" {
+		t.Fatal("RM_API_GO_REPO tanpa bawaan — setiap create akan gagal keras")
+	}
+	if !strings.Contains(c.BootstrapGoRepo, "netovas-billing/freeradius-api") {
+		t.Fatalf("bawaan repo Go bukan repo org: %q", c.BootstrapGoRepo)
 	}
 }

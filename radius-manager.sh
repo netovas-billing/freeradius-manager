@@ -35,7 +35,56 @@ PORT_REGISTRY="$FREERADIUS_DIR/.port_registry"
 FR_SCHEMA="$FREERADIUS_DIR/mods-config/sql/main/mysql/schema.sql"
 
 API_DIR_BASE="/root"
-API_REPO="https://github.com/heirro/freeradius-api"
+
+# ── Runtime freeradius-api per instance ──────────────────────────────────────
+#
+# "go" (BAWAAN) = pasang biner dari repo Go. Endpoint, port, dan nama unit SAMA
+# dengan jalur Python; yang berbeda hanya proses yang melayaninya.
+#
+# "python" = jalur lama, masih utuh sebagai jalan keluar kalau runtime Go
+# bermasalah di satu mesin.
+#
+# Bawaannya go karena itu yang diminta: instance BARU pakai Go. Instance yang
+# SUDAH BERJALAN tidak tersentuh oleh ini — setup_api berhenti lebih awal kalau
+# direktori dan unit-nya sudah ada, dan runtime go MENOLAK direktori yang memuat
+# venv/ (instance Python yang sudah hidup).
+#
+# Sakelar dan namanya DISENGAJA sepadan dengan control-plane Go
+# (RM_API_RUNTIME / RM_API_GO_REPO / RM_API_GO_REF di radius-manager-api),
+# karena kedua jalur membuat instance di mesin yang SAMA dan berbagi
+# .port_registry: bentuk yang berbeda antar-alat adalah kejutan yang mahal.
+API_RUNTIME="${API_RUNTIME:-go}"
+
+# Bisa ditimpa env (dulu penugasan mati, harus sunting berkas).
+API_REPO="${API_REPO:-https://github.com/heirro/freeradius-api}"
+
+# Dipakai HANYA saat API_RUNTIME=go. Kosong = gagal keras, BUKAN jatuh ke repo
+# Python: memasang aplikasi yang berbeda dari yang diminta operator jauh lebih
+# buruk daripada create yang gagal dengan pesan jelas.
+API_REPO_GO="${API_REPO_GO:-https://github.com/netovas-billing/freeradius-api}"
+
+# Ref yang dipaku (tag/branch/commit). Kosong = branch bawaan, TIDAK dipaku —
+# artinya dua instance yang dibuat pada hari berbeda bisa menjalankan kode
+# berbeda tanpa ada yang mencatatnya.
+API_REPO_GO_REF="${API_REPO_GO_REF:-}"
+
+# Template Go: di-clone SEKALI per mesin lalu binernya disalin per instance.
+# Repo Go membawa vendor/ (~34 MB); meng-clone-nya per instance berarti 34 MB
+# dikali jumlah instance tanpa satu pun manfaat, karena binernya statis dan sama.
+API_GO_TEMPLATE_DIR="${API_GO_TEMPLATE_DIR:-/var/lib/radius-manager/freeradius-api-go-template}"
+API_GO_BIN_NAME="freeradius-api"
+
+# Paket main repo Go ada di api/, bukan di akar.
+API_GO_PKG_SUBDIR="api"
+
+# Cache build Go. Dibuat eksplisit sebelum build; tanpa itu `go build` mati
+# dengan "failed to initialize build cache".
+API_GO_CACHE_DIR="${API_GO_CACHE_DIR:-/var/cache/radius-manager/go-build}"
+
+# Skrip pemeliharaan yang WAJIB ikut ke direktori instance. Cron menunjuk
+# keduanya DI SANA; absen = cron ENOENT tiap kali jalan, dan instance jalan
+# tanpa pembersih sesi zombie dan tanpa backup basis data.
+API_MAINT_SCRIPTS=(autoclearzombie.sh autobackups3.sh)
 # ── Blok port REST API ───────────────────────────────────────────────────────
 # Skrip ini dan radius-manager-api berbagi .port_registry, jadi bloknya harus
 # SAMA di satu mesin. Kalau beda, instance yang dibuat lewat skrip ini lahir di
@@ -1148,6 +1197,86 @@ test_disconnect() {
 # ============================================
 # FUNCTION: Setup API
 # ============================================
+# ============================================
+# FUNCTION: siapkan template Go + bangun biner
+# ============================================
+# Template di-clone SEKALI per mesin; binernya lalu disalin per instance.
+# `go build` memakai cache, jadi pemanggilan berikutnya murah dan binernya
+# dijamin cocok dengan template yang sedang aktif.
+ensure_go_template() {
+    if [ -z "$API_REPO_GO" ]; then
+        error "API_RUNTIME=go tapi API_REPO_GO kosong"
+        return 1
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        error "git tidak ada"
+        return 1
+    fi
+
+    local GO_BIN
+    GO_BIN=$(go_binary) || return 1
+
+    if [ ! -d "$API_GO_TEMPLATE_DIR" ]; then
+        info "Cloning template Go ke ${API_GO_TEMPLATE_DIR}..."
+        mkdir -p "$(dirname "$API_GO_TEMPLATE_DIR")" || return 1
+        git clone --quiet "$API_REPO_GO" "$API_GO_TEMPLATE_DIR" || {
+            error "Gagal clone repo Go: $API_REPO_GO"
+            return 1
+        }
+        if [ -n "$API_REPO_GO_REF" ]; then
+            git -C "$API_GO_TEMPLATE_DIR" checkout --quiet "$API_REPO_GO_REF" || {
+                error "Gagal checkout ref: $API_REPO_GO_REF"
+                return 1
+            }
+        fi
+        success "Template Go siap: $API_GO_TEMPLATE_DIR"
+    elif [ -z "$API_REPO_GO_REF" ]; then
+        # Ref TIDAK dipaku → tarik yang terbaru. Kalau dipaku, JANGAN pull:
+        # menariknya membuat "versi terpasang" jadi pertanyaan terbuka lagi,
+        # padahal itu justru yang dipaku.
+        info "Memperbarui template Go..."
+        git -C "$API_GO_TEMPLATE_DIR" pull --quiet --ff-only || {
+            warning "git pull template gagal — memakai checkout yang ada"
+        }
+    fi
+
+    # Build TIDAK menyentuh jaringan. VM RADIUS duduk di belakang VPN dengan
+    # egress tersaring (terbukti: apk gagal "Permission denied" ke
+    # dl-cdn.alpinelinux.org padahal Docker Hub jalan), dan menarik modul saat
+    # provisioning berarti dua instance bisa menjalankan kode berbeda.
+    # Cache build dibuat EKSPLISIT. Tanpa ini `go build` mati dengan
+    # "failed to initialize build cache ...: permission denied" — dan itu
+    # terjadi SETELAH clone berhasil, jadi gejalanya "template ada tapi binernya
+    # tidak" yang membingungkan.
+    mkdir -p "$API_GO_CACHE_DIR" || {
+        error "Gagal membuat cache build: $API_GO_CACHE_DIR"
+        return 1
+    }
+
+    info "Membangun biner Go..."
+    ( cd "${API_GO_TEMPLATE_DIR}/${API_GO_PKG_SUBDIR}" && \
+      GOPROXY=off GOFLAGS=-mod=vendor GOCACHE="$API_GO_CACHE_DIR" \
+      "$GO_BIN" build -mod=vendor -o "$API_GO_BIN_NAME" . ) || {
+        error "go build gagal"
+        return 1
+    }
+    success "Biner Go siap"
+}
+
+# install.sh memasang Go ke /usr/local/go; PATH cron/systemd belum tentu memuatnya.
+go_binary() {
+    if [ -x /usr/local/go/bin/go ]; then
+        echo /usr/local/go/bin/go
+        return 0
+    fi
+    if command -v go >/dev/null 2>&1; then
+        command -v go
+        return 0
+    fi
+    error "toolchain Go tidak ditemukan (/usr/local/go/bin/go maupun \$PATH)"
+    return 1
+}
+
 setup_api() {
     local A=$1 DB_NAME=$2 DB_USER=$3 DB_PASS=$4 API_PORT=$5
     local API_DIR="${API_DIR_BASE}/${A}-api"
@@ -1160,8 +1289,46 @@ setup_api() {
         return 0
     fi
 
-    # Clone repo jika belum ada
-    if [ -d "$API_DIR" ]; then
+    local RUNTIME_GO=false
+    if [ "$(echo "$API_RUNTIME" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" = "go" ]; then
+        RUNTIME_GO=true
+    fi
+
+    if [ "$RUNTIME_GO" = true ]; then
+        # PENJAGA: jangan pernah mengubah instance PYTHON yang sudah ada menjadi
+        # Go secara implisit. Unit lamanya menunjuk venv/bin/uvicorn dan .env-nya
+        # berbentuk Python; menimpanya akan mematikan instance yang sedang
+        # melayani pelanggan.
+        if [ -d "${API_DIR}/venv" ]; then
+            error "${API_DIR} adalah instance PYTHON yang sudah ada (ada venv/) — menolak mengubahnya ke runtime go"
+            return 1
+        fi
+
+        ensure_go_template || return 1
+
+        mkdir -p "$API_DIR" || return 1
+        info "Menyalin biner ke ${API_DIR}..."
+        cp "${API_GO_TEMPLATE_DIR}/${API_GO_PKG_SUBDIR}/${API_GO_BIN_NAME}" \
+           "${API_DIR}/${API_GO_BIN_NAME}" || {
+            error "Gagal menyalin biner"
+            return 1
+        }
+        chmod 755 "${API_DIR}/${API_GO_BIN_NAME}"
+
+        # Skrip pemeliharaan WAJIB ikut: cron menunjuk keduanya di direktori ini.
+        # Absen = cron ENOENT tiap kali jalan, dan instance jalan tanpa pembersih
+        # sesi zombie dan tanpa backup basis data — gagal senyap yang hanya
+        # terlihat oleh yang membaca log cron.
+        local MS
+        for MS in "${API_MAINT_SCRIPTS[@]}"; do
+            if [ ! -f "${API_GO_TEMPLATE_DIR}/${MS}" ]; then
+                error "Skrip pemeliharaan ${MS} tidak ada di template — instance akan jalan tanpa backup basis data"
+                return 1
+            fi
+            cp "${API_GO_TEMPLATE_DIR}/${MS}" "${API_DIR}/${MS}" || return 1
+        done
+        success "Biner + skrip pemeliharaan disalin"
+    elif [ -d "$API_DIR" ]; then
         info "Direktori '$API_DIR' sudah ada, skip clone"
     else
         info "Cloning API repo ke ${API_DIR}..."
@@ -1176,7 +1343,45 @@ setup_api() {
     local SWAGGER_PASS
     SWAGGER_PASS=$(generate_password)
     info "Membuat .env..."
-    cat > "${API_DIR}/.env" << ENVEOF
+    if [ "$RUNTIME_GO" = true ]; then
+        local API_KEY_RAND
+        API_KEY_RAND=$(generate_password)
+        cat > "${API_DIR}/.env" << ENVEOF
+# freeradius-api (runtime Go) — instance ${A}
+# Dihasilkan radius-manager.sh. Suntingan manual tertimpa saat create ulang.
+
+PORT=${API_PORT}
+
+# Kredensial Basic yang dipakai ERP. Aplikasi juga menerima nama SWAGGER_*
+# sebagai alias, tapi nama baku yang ditulis di sini supaya tak ada tebakan.
+BASIC_AUTH_USER=admin
+BASIC_AUTH_PASSWORD=${SWAGGER_PASS}
+
+# Jalan masuk kedua untuk diagnosa. Kosongkan untuk mematikan jalur X-API-Key.
+API_KEY=${API_KEY_RAND}
+
+# Database
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
+DB_NAME=${DB_NAME}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASS}
+
+# Kolom waktu radacct NAIF dan ditulis dalam WIB. Dibuat EKSPLISIT supaya
+# penafsirannya tidak ikut TZ sistem: di VM ber-TZ UTC pergeserannya 7 jam dan
+# masuk langsung ke angka tagihan tanpa satu pun galat.
+DB_TIMEZONE=Asia/Jakarta
+
+# Bawaan aplikasi 120/60s dengan SATU ember untuk seluruh backend; backend
+# menyusuri daftar 1.000 baris per permintaan dengan batas 200 halaman, jadi
+# satu penyapuan tabel besar sudah bisa melewatinya. Aplikasi Python tak punya
+# pembatas sama sekali, jadi membiarkan bawaan itu = memperkenalkan mode gagal
+# baru saat berpindah runtime.
+RATE_LIMIT_MAX=6000
+RATE_LIMIT_WINDOW_SECONDS=60
+ENVEOF
+    else
+        cat > "${API_DIR}/.env" << ENVEOF
 # Application Settings
 APP_NAME=${A}-api
 APP_DEBUG=False
@@ -1193,6 +1398,7 @@ DB_NAME=${DB_NAME}
 DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASS}
 ENVEOF
+    fi
     chmod 600 "${API_DIR}/.env"
     success ".env dibuat"
 
@@ -1247,17 +1453,19 @@ ENVEOF
         fi
     fi
 
-    # Setup Python venv
-    info "Setting up Python venv..."
-    python3 -m venv "${API_DIR}/venv" >/dev/null 2>&1 || {
-        error "Gagal buat Python venv!"
-        return 1
-    }
-    "${API_DIR}/venv/bin/pip" install -q -r "${API_DIR}/requirements.txt" || {
-        error "Gagal install requirements.txt!"
-        return 1
-    }
-    success "Python venv ready"
+    # Setup Python venv — HANYA untuk runtime python.
+    if [ "$RUNTIME_GO" != true ]; then
+        info "Setting up Python venv..."
+        python3 -m venv "${API_DIR}/venv" >/dev/null 2>&1 || {
+            error "Gagal buat Python venv!"
+            return 1
+        }
+        "${API_DIR}/venv/bin/pip" install -q -r "${API_DIR}/requirements.txt" || {
+            error "Gagal install requirements.txt!"
+            return 1
+        }
+        success "Python venv ready"
+    fi
 
     # Register API port
     touch "$PORT_REGISTRY"
@@ -1265,7 +1473,34 @@ ENVEOF
 
     # Buat systemd service
     info "Membuat systemd service: ${SERVICE_NAME}..."
-    cat > "$SERVICE_FILE" << SVCEOF
+    # Nama unit, WorkingDirectory, dan port SENGAJA sama untuk kedua runtime:
+    # itu yang membuat start/stop/restart/delete, health check, dan aturan
+    # dst-nat di concentrator tak perlu tahu runtime mana yang dipakai — dan
+    # yang membuat perpindahan ini bisa dibatalkan PER INSTANCE.
+    #
+    # Port TIDAK ada di baris perintah runtime Go: ia dibaca dari PORT di .env,
+    # yang dimuat aplikasi dari WorkingDirectory. Menaruhnya di dua tempat
+    # berarti suatu hari keduanya berbeda.
+    if [ "$RUNTIME_GO" = true ]; then
+        cat > "$SERVICE_FILE" << SVCEOF
+[Unit]
+Description=RadiusAPI (Go) - ${A}
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=${API_DIR}
+ExecStart=${API_DIR}/${API_GO_BIN_NAME}
+Restart=always
+RestartSec=5
+SyslogIdentifier=${SERVICE_NAME}
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    else
+        cat > "$SERVICE_FILE" << SVCEOF
 [Unit]
 Description=RadiusAPI with Uvicorn - ${A}
 After=network.target
@@ -1282,6 +1517,7 @@ SyslogIdentifier=${SERVICE_NAME}
 [Install]
 WantedBy=multi-user.target
 SVCEOF
+    fi
 
     systemctl daemon-reload
     systemctl enable --quiet "${SERVICE_NAME}"

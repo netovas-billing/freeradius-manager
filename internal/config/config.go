@@ -55,10 +55,16 @@ type Config struct {
 	BootstrapSkipPull    bool   // RM_API_BOOTSTRAP_SKIP_PULL=true to disable git pull on EnsureTemplate
 
 	// APIRuntime — aplikasi freeradius-api yang dipasang per instance:
-	// "python" (BAWAAN, perilaku hari ini) atau "go".
+	// "go" (BAWAAN) atau "python".
 	//
-	// Bawaannya python dengan sengaja: menambahkan opsi ini tidak boleh mengubah
-	// apa pun sampai operator memintanya secara eksplisit.
+	// Bawaannya go karena itu yang diminta: instance BARU pakai Go. Instance yang
+	// SUDAH BERJALAN tidak tersentuh — SetupInstance hanya dipanggil dari jalur
+	// create, tidak ada jalur yang menulis ulang unit systemd instance lama, dan
+	// runtime go MENOLAK direktori yang memuat venv/.
+	//
+	// Nilainya sepadan dengan API_RUNTIME di radius-manager.sh: kedua jalur
+	// membuat instance di mesin yang SAMA dan berbagi .port_registry, jadi
+	// bawaan yang berbeda antar-alat adalah kejutan yang mahal.
 	APIRuntime string // RM_API_RUNTIME
 
 	// Dipakai hanya saat APIRuntime="go".
@@ -121,8 +127,8 @@ func Load() (*Config, error) {
 		BootstrapAPIRepo:       os.Getenv("RM_API_BOOTSTRAP_REPO"),
 		BootstrapTemplateDir:   getenv("RM_API_BOOTSTRAP_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-template"),
 		BootstrapSkipPull:      strings.EqualFold(os.Getenv("RM_API_BOOTSTRAP_SKIP_PULL"), "true"),
-		APIRuntime:             getenv("RM_API_RUNTIME", "python"),
-		BootstrapGoRepo:        os.Getenv("RM_API_GO_REPO"),
+		APIRuntime:             getenv("RM_API_RUNTIME", "go"),
+		BootstrapGoRepo:        getenv("RM_API_GO_REPO", "https://github.com/netovas-billing/freeradius-api"),
 		BootstrapGoRef:         os.Getenv("RM_API_GO_REF"),
 		BootstrapGoTemplateDir: getenv("RM_API_GO_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-go-template"),
 		SystemdBackend:         strings.ToLower(getenv("RM_API_SYSTEMD_BACKEND", "systemd")),
