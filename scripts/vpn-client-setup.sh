@@ -468,6 +468,18 @@ RemainAfterExit=yes
 ExecStartPre=/bin/sleep 5
 $UNIT_START
 ExecStartPost=/bin/bash -c 'sleep 3 && echo "c $TUNNEL_NAME" > /var/run/xl2tpd/l2tp-control'
+# BUKTIKAN tunnelnya naik. Tanpa baris ini unit SELALU hijau.
+#
+# Menulis "c <tunnel>" ke socket kontrol xl2tpd hanya MENGANTRE permintaan
+# connect; penulisannya berhasil entah autentikasinya nanti diterima atau
+# ditolak, dan hasilnya tak pernah sampai ke systemd. Jadi unit ini melaporkan
+# "Finished" untuk tunnel yang tak pernah naik — pemilik sistem membacanya
+# sebagai sukses 27 Sep 2026 sementara PPP secret-nya belum ada di concentrator,
+# lalu mencari sebabnya di tempat lain berjam-jam.
+#
+# Menunggu ALAMAT muncul di antarmuka ppp*, bukan menunggu proses: itu
+# satu-satunya tanda yang berarti "peer menerima kita dan memberi alamat".
+ExecStartPost=/bin/bash -c 'for _ in $(seq 1 30); do ip -4 -o addr show 2>/dev/null | grep -qE "^[0-9]+: ppp" && exit 0; sleep 1; done; echo "GAGAL: tunnel $TUNNEL_NAME tidak naik dalam 30 detik — tak ada alamat di antarmuka ppp mana pun." >&2; echo "       Sebab paling sering: PPP secret \"$VPN_USER\" BELUM ADA di concentrator $VPN_HOST." >&2; echo "       Tempel dulu skrip concentrator (VPN Concentrator -> Setup Script -> \"RADIUS di dalam VPN\"), lalu: systemctl restart l2tp-$TUNNEL_NAME" >&2; echo "       Periksa sebabnya: journalctl -u xl2tpd -n 50 --no-pager" >&2; exit 1'
 ExecStop=/bin/bash -c 'echo "d $TUNNEL_NAME" > /var/run/xl2tpd/l2tp-control'
 $UNIT_STOPPOST
 
