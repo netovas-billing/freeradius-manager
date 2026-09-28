@@ -215,3 +215,40 @@ func TestBootstrapGoRepo_AdaBawaannya(t *testing.T) {
 		t.Fatalf("bawaan repo Go bukan repo org: %q", c.BootstrapGoRepo)
 	}
 }
+
+// Bind BAWAAN harus 0.0.0.0, bukan loopback.
+//
+// Model pemakaiannya: backend menjangkau VM lewat DSTNAT di IP publik
+// concentrator, masuk melalui IP TUNNEL. Bind loopback menolak trafik itu, dan
+// kegagalannya TAK TERLIHAT dari dalam VM — service hidup, /health lokal 200,
+// self-test installer lulus karena ia menguji 127.0.0.1 dari dalam VM sendiri.
+// Yang terlihat operator cuma "backend tak bisa menghubungi RADIUS".
+// Terjadi 28 Sep 2026 pada VM radius test1.
+func TestListen_BawaanBukanLoopback(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_LISTEN", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(c.Listen, "127.") || strings.HasPrefix(c.Listen, "localhost") {
+		t.Fatalf("bind bawaan loopback (%q) — trafik dari IP tunnel akan ditolak tanpa jejak", c.Listen)
+	}
+	if !strings.HasPrefix(c.Listen, "0.0.0.0:") {
+		t.Fatalf("bind bawaan seharusnya 0.0.0.0:<port>, dapat %q", c.Listen)
+	}
+}
+
+// Dan nilai yang diisi operator tetap dihormati — termasuk loopback, kalau itu
+// memang yang dia mau untuk mesin yang backend-nya satu host.
+func TestListen_BisaDitimpa(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_LISTEN", "0.0.0.0:20000")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != "0.0.0.0:20000" {
+		t.Fatalf("RM_API_LISTEN tidak dihormati: %q", c.Listen)
+	}
+}

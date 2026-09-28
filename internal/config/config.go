@@ -11,7 +11,24 @@ import (
 )
 
 type Config struct {
-	Listen        string // RM_API_LISTEN, default 127.0.0.1:9000
+	// Listen — alamat bind RM-API. RM_API_LISTEN, bawaan 0.0.0.0:9000.
+	//
+	// BAWAANNYA 0.0.0.0, bukan 127.0.0.1. Model pemakaiannya: backend
+	// menjangkau VM ini lewat DSTNAT di IP publik concentrator, masuk melalui
+	// IP TUNNEL. Bind loopback menolak trafik itu, dan self-test installer tetap
+	// lulus karena ia menguji 127.0.0.1 dari dalam VM — jadi kegagalannya baru
+	// terasa saat backend mencoba memakainya, tanpa satu pun galat di VM.
+	//
+	// KONSEKUENSI YANG HARUS DISADARI: dengan 0.0.0.0 API kontrol ini terbuka di
+	// SEMUA antarmuka, termasuk antarmuka publik kalau VM punya satu. Ia bisa
+	// membuat/menghapus instance beserta databasenya. Yang melindunginya tinggal
+	// Bearer token — jadi firewall mesin ini WAJIB membatasi portnya ke alamat
+	// backend/concentrator saja.
+	//
+	// PORTNYA tetap harus diisi dari blok yang dialokasikan ERP (= base, mis.
+	// 20000). Bawaan 9000 hanya membuat service hidup; ia TIDAK cocok dengan
+	// aturan DSTNAT concentrator. Lihat APIPortStart.
+	Listen        string // RM_API_LISTEN, default 0.0.0.0:9000
 	TokenFile     string // RM_API_TOKEN_FILE
 	Token         string // RM_API_TOKEN (alternative for single-token mode)
 	FreeRADIUSDir string // RM_API_FREERADIUS_DIR, default /etc/freeradius/3.0
@@ -113,7 +130,7 @@ type Config struct {
 
 func Load() (*Config, error) {
 	c := &Config{
-		Listen:                 getenv("RM_API_LISTEN", "127.0.0.1:9000"),
+		Listen:                 getenv("RM_API_LISTEN", "0.0.0.0:9000"),
 		TokenFile:              os.Getenv("RM_API_TOKEN_FILE"),
 		Token:                  os.Getenv("RM_API_TOKEN"),
 		FreeRADIUSDir:          getenv("RM_API_FREERADIUS_DIR", "/etc/freeradius/3.0"),

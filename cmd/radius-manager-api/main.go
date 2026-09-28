@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,6 +32,10 @@ import (
 )
 
 const version = "0.1.0"
+
+// portBawaanRMAPI — port bawaan RM_API_LISTEN. Dipakai mendeteksi VM yang belum
+// diberi blok portnya oleh ERP; lihat peringatan di main().
+const portBawaanRMAPI = "9000"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -203,6 +208,26 @@ func runServe() error {
 			slog.Int("dipakai", ports.APIPortStart),
 			slog.Int("min", manager.MinAPIPortStart),
 			slog.Int("max", manager.MaxAPIPortStart),
+		)
+	}
+
+	// VM YANG BELUM DIBERI BLOK PORT-nya harus BERISIK, bukan diam.
+	//
+	// Backend menjangkau VM ini lewat DSTNAT 1:1 di IP publik concentrator, dan
+	// port tujuannya = base blok yang dialokasikan ERP (mis. 20000). Selama
+	// RM_API_LISTEN masih di port bawaan, tak ada satu pun permintaan backend
+	// yang mendarat: aturan NAT menuju :20000 sementara kita mendengar di :9000.
+	//
+	// Kegagalannya SENYAP TOTAL dari sisi VM — service hidup, /health lokal 200,
+	// self-test installer lulus (ia menguji 127.0.0.1 dari dalam VM). Yang
+	// terlihat operator cuma "backend tak bisa menghubungi RADIUS", dan ia lalu
+	// mencari sebabnya di VPN atau di firewall. Terjadi 28 Sep 2026.
+	if _, portListen, errPort := net.SplitHostPort(cfg.Listen); errPort == nil && portListen == portBawaanRMAPI {
+		logger.Warn("RM_API_LISTEN masih di port bawaan — backend TIDAK akan bisa menghubungi VM ini",
+			slog.String("listen", cfg.Listen),
+			slog.String("sebab", "DSTNAT concentrator menuju base blok port VM ini (mis. 20000), bukan "+portBawaanRMAPI),
+			slog.String("perbaikan", "isi RM_API_LISTEN dan RM_API_API_PORT_START di /etc/radius-manager-api/env "+
+				"dengan nilai dari menu ERP \"Server RADIUS Manager -> Setup Script\", lalu restart service"),
 		)
 	}
 

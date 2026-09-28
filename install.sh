@@ -252,6 +252,10 @@ else
 # Manager -> Setup Script" — bukan dikarang sendiri.
 # Mengikat langsung ke IP tunnel TIDAK disarankan: alamat itu baru ada setelah
 # VPN naik, sehingga service gagal start saat boot. Pakai 0.0.0.0 + firewall.
+#
+# BAWAANNYA kini 0.0.0.0:9000 (bukan 127.0.0.1): bind loopback menolak trafik
+# dari IP tunnel, dan kegagalannya tak terlihat dari dalam VM. Tapi PORTNYA tetap
+# harus Anda isi — 9000 tidak cocok dengan DSTNAT concentrator.
 #RM_API_LISTEN=0.0.0.0:20000
 
 # Jumlah instance FreeRADIUS yang boleh hidup di mesin ini. Angka ini juga
@@ -452,6 +456,36 @@ if ! grep -qE '^[[:space:]]*RM_API_API_PUBLISH_IP=' "$ENV_FILE" 2>/dev/null; the
     warn "RM_API_API_PUBLISH_IP belum diisi di $ENV_FILE"
     warn "  → instance baru akan lahir dengan URL http://0.0.0.0:<port> dan tidak bisa dihubungi backend."
     warn "  → isi dulu, lalu: systemctl restart radius-manager-api"
+fi
+
+# RM_API_LISTEN yang masih di port bawaan = VM ini belum diberi blok portnya.
+#
+# Backend menjangkau VM ini lewat DSTNAT 1:1 di IP publik concentrator, dan port
+# tujuannya = base blok yang dialokasikan ERP (mis. 20000). Selama listen masih
+# di port bawaan, tak satu pun permintaan backend mendarat — dan dari sisi VM
+# semuanya tampak sehat: service hidup, self-test di bawah LULUS (ia menguji
+# 127.0.0.1 dari dalam VM ini), tak ada galat di mana pun. Yang terlihat operator
+# cuma "backend tak bisa menghubungi RADIUS", lalu ia mencari sebabnya di VPN.
+# Terjadi 28 Sep 2026. Karena itu peringatannya di sini, bukan cuma di journal.
+if ! grep -qE '^[[:space:]]*RM_API_LISTEN=' "$ENV_FILE" 2>/dev/null; then
+    warn "RM_API_LISTEN belum diisi di $ENV_FILE — memakai bawaan 0.0.0.0:9000"
+    warn "  → backend TIDAK akan bisa menghubungi VM ini: aturan DSTNAT concentrator"
+    warn "    menuju base blok port VM ini (mis. 20000), bukan 9000."
+    warn "  → ambil nilainya dari menu ERP \"Server RADIUS Manager -> Setup Script\":"
+    warn "        RM_API_LISTEN=0.0.0.0:<base>          (mis. 0.0.0.0:20000)"
+    warn "        RM_API_API_PORT_START=<base+100>      (mis. 20100)"
+    warn "  → lalu: systemctl restart radius-manager-api"
+fi
+
+# Bind 0.0.0.0 adalah BAWAAN sekarang, dan itu keputusan sadar: model
+# pemakaiannya menuntut trafik dari IP tunnel diterima, sementara bind loopback
+# menolaknya tanpa jejak. Konsekuensinya harus disebut, bukan didiamkan.
+if grep -qE '^[[:space:]]*RM_API_LISTEN=0\.0\.0\.0' "$ENV_FILE" 2>/dev/null \
+   || ! grep -qE '^[[:space:]]*RM_API_LISTEN=' "$ENV_FILE" 2>/dev/null; then
+    warn "RM-API mendengar di SEMUA antarmuka (0.0.0.0)."
+    warn "  → API ini bisa membuat/menghapus instance beserta databasenya;"
+    warn "    yang melindunginya tinggal Bearer token."
+    warn "  → batasi portnya di firewall ke alamat backend/concentrator saja."
 fi
 
 phase "Summary"
