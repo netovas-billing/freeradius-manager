@@ -30,6 +30,10 @@ success() { echo "${LOG_PREFIX} [OK]    $*"; }
 warning() { echo "${LOG_PREFIX} [WARN]  $*"; }
 error()   { echo "${LOG_PREFIX} [ERROR] $*"; }
 
+# git tidak boleh bertanya: dijalankan cron/otomatis, prompt = menggantung diam.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
+
 go_binary() {
     if [ -x /usr/local/go/bin/go ]; then echo /usr/local/go/bin/go; return 0; fi
     if command -v go >/dev/null 2>&1; then command -v go; return 0; fi

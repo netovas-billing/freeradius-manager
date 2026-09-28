@@ -545,7 +545,18 @@ create_database() {
         mysql_cmd -e "CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
         success "User '${DB_USER}'@'localhost' dibuat"
     fi
-    mysql_cmd -e "GRANT SELECT,INSERT,UPDATE,DELETE ON \`${DB_NAME}\`.*
+    # CREATE/ALTER/INDEX/REFERENCES diperlukan runtime GO, bukan kemewahan:
+    # API Go menjalankan AutoMigrate untuk TABEL MILIKNYA SENDIRI saat start
+    # (api_keys, api_audit_log, webhooks, webhook_deliveries), dan tanpa hak itu
+    # ia keluar dengan "automigrate failed" — service gagal start, dan yang
+    # terlihat operator cuma "API service gagal start!".
+    #
+    # DROP SENGAJA TIDAK diberikan: AutoMigrate tidak membutuhkannya, dan tanpa
+    # DROP sebuah instance yang disusupi tetap tidak bisa menghapus radacct.
+    #
+    # Aplikasi Python tidak pernah butuh ini karena ia tak pernah membuat tabel —
+    # skemanya diimpor skrip ini sebagai root.
+    mysql_cmd -e "GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON \`${DB_NAME}\`.*
         TO '${DB_USER}'@'localhost';"
 
     # User remote
@@ -565,7 +576,7 @@ create_database() {
                 IDENTIFIED BY '${DB_PASS}';"
             success "User '${DB_USER}'@'${DB_REMOTE_HOST}' dibuat (remote)"
         fi
-        mysql_cmd -e "GRANT SELECT,INSERT,UPDATE,DELETE ON \`${DB_NAME}\`.*
+        mysql_cmd -e "GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON \`${DB_NAME}\`.*
             TO '${DB_USER}'@'${DB_REMOTE_HOST}';"
     fi
 
@@ -1203,6 +1214,35 @@ test_disconnect() {
 # Template di-clone SEKALI per mesin; binernya lalu disalin per instance.
 # `go build` memakai cache, jadi pemanggilan berikutnya murah dan binernya
 # dijamin cocok dengan template yang sedang aktif.
+# git TIDAK BOLEH bertanya.
+#
+# Kalau repo-nya privat dan tak ada kredensial, `git clone` HTTPS dari TERMINAL
+# menampilkan "Username for 'https://github.com':" lalu MENUNGGU — create berhenti
+# di tengah jalan, sesudah database dan konfigurasi FreeRADIUS terlanjur dibuat.
+#
+# Tanpa tty (cron/systemd) git sudah gagal sendiri, jadi ini bukan soal
+# menggantung di sana. Gunanya membuat perilakunya SAMA di kedua konteks dan
+# gagal seketika dengan pesan yang bisa ditindak, bukan dengan prompt yang
+# membingungkan.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
+
+# Pesan yang menerangkan apa yang harus dilakukan, bukan sekadar "gagal clone".
+pesan_gagal_clone() {
+    local repo=$1
+    error "Gagal clone repo: ${repo}"
+    error "  Repo ini privat. Pilih SALAH SATU di VM ini:"
+    error "    1) Deploy key SSH (disarankan, baca-saja):"
+    error "         ssh-keygen -t ed25519 -f /root/.ssh/id_netovas -N ''"
+    error "         # tambahkan isi /root/.ssh/id_netovas.pub sebagai Deploy key di repo"
+    error "         ssh-keyscan github.com >> /root/.ssh/known_hosts"
+    error "         export API_REPO_GO=git@github.com:netovas-billing/freeradius-api.git"
+    error "    2) Token baca-saja lewat HTTPS:"
+    error "         export API_REPO_GO=https://<token>@github.com/netovas-billing/freeradius-api"
+    error "    3) Siapkan template sekali secara manual, lalu create akan memakainya:"
+    error "         git clone <repo> ${API_GO_TEMPLATE_DIR}"
+}
+
 ensure_go_template() {
     if [ -z "$API_REPO_GO" ]; then
         error "API_RUNTIME=go tapi API_REPO_GO kosong"
@@ -1220,7 +1260,8 @@ ensure_go_template() {
         info "Cloning template Go ke ${API_GO_TEMPLATE_DIR}..."
         mkdir -p "$(dirname "$API_GO_TEMPLATE_DIR")" || return 1
         git clone --quiet "$API_REPO_GO" "$API_GO_TEMPLATE_DIR" || {
-            error "Gagal clone repo Go: $API_REPO_GO"
+            pesan_gagal_clone "$API_REPO_GO"
+            rm -rf "$API_GO_TEMPLATE_DIR"
             return 1
         }
         if [ -n "$API_REPO_GO_REF" ]; then

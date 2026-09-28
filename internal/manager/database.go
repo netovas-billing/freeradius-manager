@@ -97,7 +97,13 @@ func (m *DBManager) CreateUserAndGrant(ctx context.Context, dbName, user, passwo
 		if _, err := m.DB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("user %s@%s: %w", user, host, err)
 		}
-		grant := fmt.Sprintf("GRANT SELECT,INSERT,UPDATE,DELETE ON `%s`.* TO '%s'@'%s'", dbName, user, host)
+		// CREATE/ALTER/INDEX/REFERENCES diperlukan runtime GO: API Go
+		// menjalankan AutoMigrate untuk tabel miliknya sendiri saat start
+		// (api_keys, api_audit_log, webhooks, webhook_deliveries) dan tanpa hak
+		// itu prosesnya keluar dengan "automigrate failed" — service gagal start.
+		// DROP sengaja TIDAK diberikan: AutoMigrate tak membutuhkannya, dan
+		// tanpa DROP instance yang disusupi tetap tak bisa menghapus radacct.
+		grant := fmt.Sprintf("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `%s`.* TO '%s'@'%s'", dbName, user, host)
 		if _, err := m.DB.ExecContext(ctx, grant); err != nil {
 			return fmt.Errorf("grant %s@%s: %w", user, host, err)
 		}

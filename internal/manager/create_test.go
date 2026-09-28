@@ -56,7 +56,7 @@ func TestCreateInstance_HappyPath(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
 		WillReturnRows(sqlmock.NewRows([]string{"t"}))
@@ -291,7 +291,7 @@ func TestCreateInstance_WithBootstrap_ClonesAndSetsUpAPIDir(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
 		WillReturnRows(sqlmock.NewRows([]string{"t"}))
@@ -380,7 +380,7 @@ func TestCreateInstance_WithMaintenance_InstallsTimers(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
 		WillReturnRows(sqlmock.NewRows([]string{"t"}))
@@ -432,7 +432,7 @@ func TestCreateInstance_MaintenanceFailure_RollsBack(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
 		WillReturnRows(sqlmock.NewRows([]string{"t"}))
@@ -478,7 +478,7 @@ func TestCreateInstance_BootstrapFailureRollsBack(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
 		WillReturnRows(sqlmock.NewRows([]string{"t"}))

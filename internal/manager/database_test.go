@@ -1,6 +1,9 @@
 package manager
 
 import (
+	"os"
+	"strings"
+
 	"context"
 	"regexp"
 	"testing"
@@ -15,9 +18,9 @@ func newMockDB(t *testing.T) (*DBManager, sqlmock.Sqlmock, func()) {
 		t.Fatal(err)
 	}
 	dm := &DBManager{
-		DB:           db,
-		AllowRemote:  true,
-		RemoteHost:   "%",
+		DB:          db,
+		AllowRemote: true,
+		RemoteHost:  "%",
 	}
 	return dm, mock, func() { db.Close() }
 }
@@ -64,7 +67,7 @@ func TestDBManager_CreateUserAndGrant_LocalhostAndRemote(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost' IDENTIFIED BY 'pw'").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`\\.\\* TO 'mitra_x'@'localhost'").
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`\\.\\* TO 'mitra_x'@'localhost'").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// remote user count → 0 → CREATE
@@ -72,7 +75,7 @@ func TestDBManager_CreateUserAndGrant_LocalhostAndRemote(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec("CREATE USER 'mitra_x'@'%' IDENTIFIED BY 'pw'").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`\\.\\* TO 'mitra_x'@'%'").
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`\\.\\* TO 'mitra_x'@'%'").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -95,7 +98,7 @@ func TestDBManager_CreateUserAndGrant_AlreadyExists_AltersPassword(t *testing.T)
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec("ALTER USER 'mitra_x'@'localhost' IDENTIFIED BY 'newpw'").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE ON `mitra_x`\\.\\* TO 'mitra_x'@'localhost'").
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`\\.\\* TO 'mitra_x'@'localhost'").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -139,11 +142,11 @@ func TestDBManager_RejectsInvalidNameForBacktickInjection(t *testing.T) {
 	defer cleanup()
 
 	bad := []string{
-		"foo`bar",       // backtick injection
-		"foo' OR '1",    // quote injection
-		"foo;DROP",      // statement separator
-		"foo bar",       // whitespace
-		"",              // empty
+		"foo`bar",    // backtick injection
+		"foo' OR '1", // quote injection
+		"foo;DROP",   // statement separator
+		"foo bar",    // whitespace
+		"",           // empty
 	}
 	for _, name := range bad {
 		if err := dm.CreateDatabase(context.Background(), name); err == nil {
@@ -198,3 +201,42 @@ func TestDBManager_ImportSchema_SkipsIfRadcheckExists(t *testing.T) {
 // Migration mirrors internal/schema.Migration so the manager package
 // can accept migrations from any source without an import cycle.
 // Defined in database.go.
+
+// Hak yang DIBUTUHKAN AutoMigrate harus ada, dan DROP harus TIDAK ada.
+//
+// Runtime Go menjalankan AutoMigrate untuk tabel miliknya sendiri saat start.
+// Tanpa CREATE, prosesnya keluar dengan "automigrate failed" dan service gagal
+// start — yang terlihat operator cuma "API service gagal start!", tanpa petunjuk
+// ke sebabnya. Terjadi nyata 28 Sep 2026 pada instance testv2.
+//
+// DROP sengaja TIDAK diberikan: AutoMigrate tak membutuhkannya, dan tanpa DROP
+// instance yang disusupi tetap tidak bisa menghapus radacct.
+//
+// Memindai SUMBER, bukan memanggil fungsinya: pernyataan grant dirakit dengan
+// Sprintf lalu langsung dieksekusi, jadi satu-satunya cara mengunci daftar
+// haknya tanpa DB sungguhan adalah membaca literalnya. Tes yang menyusun
+// sendiri string yang diperiksa tidak menjaga apa pun.
+func TestGrant_MemuatHakAutoMigrateTanpaDrop(t *testing.T) {
+	src, err := os.ReadFile("database.go")
+	if err != nil {
+		t.Fatalf("baca database.go: %v", err)
+	}
+	var grant string
+	for _, baris := range strings.Split(string(src), "\n") {
+		if strings.Contains(baris, "GRANT ") && strings.Contains(baris, "Sprintf") {
+			grant = baris
+			break
+		}
+	}
+	if grant == "" {
+		t.Fatal("pernyataan GRANT tidak ditemukan di database.go")
+	}
+	for _, wajib := range []string{"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX", "REFERENCES"} {
+		if !strings.Contains(grant, wajib) {
+			t.Fatalf("hak %s hilang dari grant — AutoMigrate gagal dan service tak mau start.\n%s", wajib, grant)
+		}
+	}
+	if strings.Contains(grant, "DROP") {
+		t.Fatalf("DROP diberikan — instance yang disusupi bisa menghapus radacct.\n%s", grant)
+	}
+}

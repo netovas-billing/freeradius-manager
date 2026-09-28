@@ -268,8 +268,25 @@ func (g *RealGit) bin() string {
 	return g.Bin
 }
 
+// envGitNonInteraktif — git TIDAK BOLEH bertanya.
+//
+// Repo privat tanpa kredensial membuat git HTTPS meminta "Username for ..." bila
+// ada tty. RM-API biasanya jalan tanpa tty, dan di situ git sudah gagal sendiri —
+// jadi ini bukan soal menggantung. Gunanya membuat perilakunya DETERMINISTIK
+// (sama dengan/tanpa tty, dan tak terpengaruh credential helper yang kebetulan
+// terpasang) sehingga galatnya selalu terbaca di log alih-alih jadi prompt yang
+// tak pernah dijawab siapa pun.
+func envGitNonInteraktif() []string {
+	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if os.Getenv("GIT_SSH_COMMAND") == "" {
+		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	}
+	return env
+}
+
 func (g *RealGit) Clone(ctx context.Context, repoURL, dir string) error {
 	cmd := exec.CommandContext(ctx, g.bin(), "clone", "--quiet", repoURL, dir)
+	cmd.Env = envGitNonInteraktif()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git clone %s -> %s: %w; output: %s", repoURL, dir, err, out)
@@ -290,6 +307,7 @@ func (g *RealGit) CloneRef(ctx context.Context, repoURL, ref, dir string) error 
 		return err
 	}
 	cmd := exec.CommandContext(ctx, g.bin(), "-C", dir, "checkout", "--quiet", ref)
+	cmd.Env = envGitNonInteraktif()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git checkout %s in %s: %w; output: %s", ref, dir, err, out)
@@ -299,6 +317,7 @@ func (g *RealGit) CloneRef(ctx context.Context, repoURL, ref, dir string) error 
 
 func (g *RealGit) Pull(ctx context.Context, dir string) error {
 	cmd := exec.CommandContext(ctx, g.bin(), "-C", dir, "pull", "--quiet", "--ff-only")
+	cmd.Env = envGitNonInteraktif()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git pull in %s: %w; output: %s", dir, err, out)
