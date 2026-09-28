@@ -1243,6 +1243,26 @@ pesan_gagal_clone() {
     error "         git clone <repo> ${API_GO_TEMPLATE_DIR}"
 }
 
+# baca_kredensial_api <api_dir> <user|pass>
+#
+# Membaca kredensial API dari .env instance, MENGERTI KEDUA BENTUK:
+#   runtime python → SWAGGER_USERNAME / SWAGGER_PASSWORD
+#   runtime go     → BASIC_AUTH_USER  / BASIC_AUTH_PASSWORD
+#
+# Mengembalikan string kosong bila .env belum ada, TANPA mencetak galat. Dulu
+# pemanggilnya meng-grep berkas yang belum dibuat, sehingga setiap create
+# memuntahkan "grep: /root/<nama>-api/.env: No such file or directory" DAN
+# mencatat kredensial KOSONG ke .instance_<nama>.
+baca_kredensial_api() {
+    local envf="$1/.env" jenis="$2"
+    [ -f "$envf" ] || { echo ""; return 0; }
+    case "$jenis" in
+        user) grep -m1 -E '^(SWAGGER_USERNAME|BASIC_AUTH_USER)=' "$envf" 2>/dev/null | cut -d= -f2- ;;
+        pass) grep -m1 -E '^(SWAGGER_PASSWORD|BASIC_AUTH_PASSWORD)=' "$envf" 2>/dev/null | cut -d= -f2- ;;
+        *)    echo "" ;;
+    esac
+}
+
 ensure_go_template() {
     if [ -z "$API_REPO_GO" ]; then
         error "API_RUNTIME=go tapi API_REPO_GO kosong"
@@ -1652,6 +1672,47 @@ case "${1:-}" in
         DB_USER="${ADMIN_USERNAME}"
         DB_PASS="${3:-$(generate_password)}"
 
+        # TOLAK kalau instance-nya sudah ada — SEBELUM apa pun berubah.
+        #
+        # Menjalankan ulang `create` atas instance yang sudah ada TIDAK
+        # memperbaiki apa pun, ia MERUSAK: create_database memutar sandi DB tanpa
+        # syarat, lalu setup_api melewati penulisan .env karena direktori dan unit
+        # sudah ada. Hasilnya .env memegang sandi LAMA sementara database sudah
+        # memakai yang BARU — instance itu tak akan pernah bisa connect lagi, dan
+        # ringkasan di akhir tetap berkata "berhasil dibuat" dengan Swagger User
+        # dan Pass KOSONG.
+        #
+        # Selain itu tiap percobaan mengalokasikan port API baru (8100, 8101,
+        # 8102, ...) yang tak pernah dipakai, sementara unit lamanya masih
+        # menunjuk port yang pertama.
+        #
+        # Penjaganya diletakkan sebelum alokasi port supaya percobaan yang ditolak
+        # tidak meninggalkan jejak sama sekali.
+        _API_DIR_CEK="${API_DIR_BASE}/${ADMIN_USERNAME}-api"
+        _UNIT_CEK="/etc/systemd/system/${ADMIN_USERNAME}-api.service"
+        _INFO_CEK="${FREERADIUS_DIR}/.instance_${ADMIN_USERNAME}"
+        _ADA=()
+        [ -e "$_INFO_CEK" ] && _ADA+=("berkas info instance: $_INFO_CEK")
+        [ -d "$_API_DIR_CEK" ] && _ADA+=("direktori API: $_API_DIR_CEK")
+        [ -f "$_UNIT_CEK" ] && _ADA+=("unit systemd: $_UNIT_CEK")
+
+        if [ ${#_ADA[@]} -gt 0 ]; then
+            error "Instance '${ADMIN_USERNAME}' sudah ada sebagian atau seluruhnya:"
+            for _x in "${_ADA[@]}"; do error "    - $_x"; done
+            error ""
+            error "  TIDAK ADA yang diubah — sandi database tidak diputar."
+            error ""
+            error "  Kalau instance ini BELUM dipakai (mis. create sebelumnya gagal"
+            error "  di tengah), hapus dulu lalu buat ulang:"
+            error "      $0 delete ${ADMIN_USERNAME} --with-db"
+            error "      $0 create ${ADMIN_USERNAME}"
+            error ""
+            error "  Kalau instance ini SUDAH MELAYANI PELANGGAN, JANGAN dihapus."
+            error "  \`create\` bukan perintah perbaikan; perbaiki bagian yang rusak"
+            error "  secara langsung (mis. .env, unit systemd, atau grant database)."
+            exit 1
+        fi
+
         info "Mencari port kosong..."
         AUTH_PORT=$(find_available_port)
         ACCT_PORT=$((AUTH_PORT + 1))
@@ -1679,7 +1740,6 @@ case "${1:-}" in
 
         # Simpan info instance
         INFO_FILE="$FREERADIUS_DIR/.instance_${ADMIN_USERNAME}"
-        INFO_API_FILE="$API_DIR_BASE/${ADMIN_USERNAME}-api/.env"
         cat > "$INFO_FILE" << INFOEOF
 ADMIN_USERNAME=${ADMIN_USERNAME}
 DB_HOST=${DB_HOST}
@@ -1692,8 +1752,8 @@ ACCT_PORT=${ACCT_PORT}
 COA_PORT=${COA_PORT}
 INNER_PORT=${INNER_PORT}
 API_PORT=${API_PORT}
-SWAGGER_USERNAME=admin
-SWAGGER_PASSWORD=$(grep '^SWAGGER_PASSWORD=' "$INFO_API_FILE" | cut -d= -f2)
+SWAGGER_USERNAME=
+SWAGGER_PASSWORD=
 WEB_API_URL=http://$(hostname -I | awk '{print $1}'):${API_PORT}/docs
 CREATED="$(date '+%Y-%m-%d %H:%M:%S')"
 INFOEOF
@@ -1711,6 +1771,15 @@ INFOEOF
         restart_freeradius
         setup_api             "$ADMIN_USERNAME" "$DB_NAME" "$DB_USER" "$DB_PASS" "$API_PORT"
 
+        # Kredensial API baru ADA sesudah setup_api menulis .env, jadi dicatat di
+        # sini — bukan di heredoc di atas yang berjalan jauh lebih dulu. Tanpa ini
+        # `info <nama>` memperlihatkan kredensial KOSONG dan tak ada cara
+        # mengambilnya selain membaca .env instance secara manual.
+        _API_USER=$(baca_kredensial_api "$API_DIR_BASE/${ADMIN_USERNAME}-api" user)
+        _API_PASS=$(baca_kredensial_api "$API_DIR_BASE/${ADMIN_USERNAME}-api" pass)
+        sed -i -e "s|^SWAGGER_USERNAME=.*|SWAGGER_USERNAME=${_API_USER}|" \
+               -e "s|^SWAGGER_PASSWORD=.*|SWAGGER_PASSWORD=${_API_PASS}|" "$INFO_FILE"
+
         echo ""
         header "======================================================"
         success "Instance '$ADMIN_USERNAME' berhasil dibuat!"
@@ -1720,8 +1789,8 @@ INFOEOF
         echo "  DB Name    : $DB_NAME"
         echo "  DB User    : $DB_USER"
         echo "  DB Pass    : $DB_PASS"
-        echo " Swagger User: $(grep '^SWAGGER_USERNAME=' "$INFO_API_FILE" | cut -d= -f2)"
-        echo " Swagger Pass: $(grep '^SWAGGER_PASSWORD=' "$INFO_API_FILE" | cut -d= -f2)"
+        echo " API User   : ${_API_USER}"
+        echo " API Pass   : ${_API_PASS}"
         echo "  Web API URL: $API_PORT  → http://$(hostname -I | awk '{print $1}'):${API_PORT}/docs"
         echo ""
         echo "  Info  : $0 info $ADMIN_USERNAME"
@@ -1830,7 +1899,6 @@ INFOEOF
     info)
         [ $# -ge 2 ] || { echo "Usage: $0 info <admin>"; exit 1; }
         INFO_FILE="$FREERADIUS_DIR/.instance_${2}"
-        INFO_API_FILE="$API_DIR_BASE/${2}-api/.env"
         [ -f "$INFO_FILE" ] || { error "Info tidak ditemukan: $2"; exit 1; }
         echo ""
         header "=== Instance: $2 ==="
@@ -1842,8 +1910,8 @@ INFOEOF
         echo " DB Name    : $(grep '^DB_NAME=' "$INFO_FILE" | cut -d= -f2)"
         echo " DB User    : $(grep '^DB_USER=' "$INFO_FILE" | cut -d= -f2)"
         echo " DB Pass    : $(grep '^DB_PASS=' "$INFO_FILE" | cut -d= -f2)"
-        echo " Swagger User: $(grep '^SWAGGER_USERNAME=' "$INFO_API_FILE" | cut -d= -f2)"
-        echo " Swagger Pass: $(grep '^SWAGGER_PASSWORD=' "$INFO_API_FILE" | cut -d= -f2)"
+        echo " API User   : $(baca_kredensial_api "$API_DIR_BASE/${2}-api" user)"
+        echo " API Pass   : $(baca_kredensial_api "$API_DIR_BASE/${2}-api" pass)"
         echo " API URL    : $(grep '^WEB_API_URL=' "$INFO_FILE" | cut -d= -f2)"
         #cat "$INFO_FILE"
         echo ""
