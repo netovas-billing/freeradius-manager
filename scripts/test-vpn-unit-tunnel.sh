@@ -67,6 +67,82 @@ else
   bad "verifikasi mendahului connect (connect=$BARIS_CONNECT verif=$BARIS_VERIF) — akan selalu gagal"
 fi
 
-echo
-[ "$GAGAL" = 0 ] && { echo "Semua uji unit tunnel lolos."; exit 0; }
-echo "Ada uji yang gagal." >&2; exit 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. UNIT-nya HARUS BENAR-BENAR TER-PARSE systemd.
+#
+# ADA KARENA KEGAGALAN NYATA 28 Sep 2026: seluruh pemeriksaan di atas HIJAU
+# sementara unit yang diterbitkan DITOLAK systemd dengan
+#
+#   /etc/systemd/system/l2tp-vpn-mikrotik.service:25: Unbalanced quoting
+#   Unit configuration has fatal error, unit will not be started
+#
+# Sebabnya: pemeriksaan di atas membaca TEMPLATE-nya (hasil `sed` dari skrip),
+# bukan unit yang SUDAH DIEKSPANSI. Di template tertulis `$(seq 1 30)`; heredoc
+# penulisnya tidak berkutip, jadi substitusi itu dijalankan saat menulis dan
+# `seq` mencetak satu angka per BARIS — satu direktif pecah menjadi 30 baris.
+# grep atas template tak mungkin melihat itu.
+#
+# Pelajarannya: menegaskan STRING yang ada tidak sama dengan menegaskan unit
+# yang SAH. Bagian ini mengekspansi template dengan nilai boneka lalu menyerahkan
+# hasilnya ke systemd untuk dinilai.
+if ! command -v systemd-analyze >/dev/null 2>&1; then
+  printf '[lewat] systemd-analyze tidak ada — verifikasi parse dilewati\n'
+else
+  TMPD=$(mktemp -d)
+  trap 'rm -rf "$TMPD"' EXIT
+
+  # Nilai boneka untuk setiap variabel yang dipakai template.
+  DESK_IPSEC=" (tanpa IPsec)"
+  VPN_HOST="203.0.113.10"
+  UNIT_AFTER="network-online.target xl2tpd.service"
+  UNIT_REQ=""
+  UNIT_START="ExecStart=/bin/systemctl start xl2tpd.service"
+  UNIT_STOPPOST=""
+  TUNNEL_NAME="uji-tunnel"
+  VPN_USER="radius-uji-abc123"
+  export DESK_IPSEC VPN_HOST UNIT_AFTER UNIT_REQ UNIT_START UNIT_STOPPOST TUNNEL_NAME VPN_USER
+
+  # Ekspansi template dengan SATU lintasan heredoc, persis seperti produksi.
+  #
+  # SENGAJA BUKAN `eval "cat <<EOF ... EOF"`: eval memproses string itu sekali
+  # lagi SEBELUM heredoc-nya berjalan, jadi `\$(...)` yang di produksi lewat apa
+  # adanya justru IKUT DIJALANKAN di tes. Tesnya lalu melaporkan bug yang tidak
+  # ada di produksi, dan — lebih buruk — bisa MENUTUPI yang nyata.
+  #
+  # Skrip sekali-pakai di bawah memuat heredoc-nya secara LITERAL, jadi jumlah
+  # lintasan ekspansinya sama dengan vpn-client-setup.sh: tepat satu.
+  sed -n '/^\[Unit\]$/,/^EOF$/p' scripts/vpn-client-setup.sh | sed '$d' > "$TMPD/tmpl"
+  {
+    printf 'cat <<EOF\n'
+    cat "$TMPD/tmpl"
+    printf 'EOF\n'
+  } > "$TMPD/gen.sh"
+  bash "$TMPD/gen.sh" > "$TMPD/l2tp-uji-tunnel.service"
+
+  # Satu direktif TIDAK BOLEH pecah jadi beberapa baris: setiap baris tak-kosong
+  # yang bukan komentar harus berupa "Kunci=..." atau "[Seksi]".
+  BARIS_LIAR=$(grep -nvE '^\[|^[A-Za-z][A-Za-z0-9]*=|^#|^$' "$TMPD/l2tp-uji-tunnel.service" || true)
+  if [ -n "$BARIS_LIAR" ]; then
+    bad "unit hasil ekspansi punya baris yang bukan direktif (satu direktif pecah jadi banyak baris):"
+    printf '%s\n' "$BARIS_LIAR" | head -5 >&2
+  else
+    ok "setiap baris unit hasil ekspansi berupa direktif utuh"
+  fi
+
+  # Dan systemd sendiri yang menilai. Galat parse dilaporkan ke stderr;
+  # keluhan soal unit lain di After= (mis. xl2tpd tak terpasang di mesin dev)
+  # BUKAN galat sintaksis, jadi disaring.
+  VERIF=$(systemd-analyze verify "$TMPD/l2tp-uji-tunnel.service" 2>&1 || true)
+  PARSE_BURUK=$(printf '%s\n' "$VERIF" | grep -iE 'unbalanced|invalid|bad |fatal|unknown lvalue|missing|syntax' \
+                | grep -viE 'not found|does not exist|Unknown unit type|command not found' || true)
+  if [ -n "$PARSE_BURUK" ]; then
+    bad "systemd-analyze verify menolak unit-nya:"
+    printf '%s\n' "$PARSE_BURUK" | head -6 >&2
+  else
+    ok "systemd-analyze verify menerima unit hasil ekspansi"
+  fi
+fi
+
+[ "$GAGAL" -eq 0 ] && printf '\nSEMUA PEMERIKSAAN LULUS\n' || printf '\nADA YANG GAGAL\n' >&2
+exit "$GAGAL"

@@ -457,7 +457,7 @@ fi
 tulis_berkas "/etc/systemd/system/l2tp-${TUNNEL_NAME}.service" <<EOF
 [Unit]
 Description=Tunnel L2TP${DESK_IPSEC} ke VPN concentrator ($VPN_HOST)
-Documentation=vpn-client-setup.sh
+Documentation=https://github.com/netovas-billing/freeradius-manager/blob/master/scripts/vpn-client-setup.sh
 After=$UNIT_AFTER
 Wants=network-online.target
 $UNIT_REQ
@@ -479,7 +479,24 @@ ExecStartPost=/bin/bash -c 'sleep 3 && echo "c $TUNNEL_NAME" > /var/run/xl2tpd/l
 #
 # Menunggu ALAMAT muncul di antarmuka ppp*, bukan menunggu proses: itu
 # satu-satunya tanda yang berarti "peer menerima kita dan memberi alamat".
-ExecStartPost=/bin/bash -c 'for _ in $(seq 1 30); do ip -4 -o addr show 2>/dev/null | grep -qE "^[0-9]+: ppp" && exit 0; sleep 1; done; echo "GAGAL: tunnel $TUNNEL_NAME tidak naik dalam 30 detik — tak ada alamat di antarmuka ppp mana pun." >&2; echo "       Sebab paling sering: PPP secret \"$VPN_USER\" BELUM ADA di concentrator $VPN_HOST." >&2; echo "       Tempel dulu skrip concentrator (VPN Concentrator -> Setup Script -> \"RADIUS di dalam VPN\"), lalu: systemctl restart l2tp-$TUNNEL_NAME" >&2; echo "       Periksa sebabnya: journalctl -u xl2tpd -n 50 --no-pager" >&2; exit 1'
+#
+# JANGAN pakai \$(seq 1 30) di sini — perhatikan backslash-nya, ia WAJIB.
+# Heredoc penulis unit ini TIDAK berkutip,
+# jadi substitusi perintah dijalankan SAAT MENULIS — dan 'seq' mencetak satu
+# angka per BARIS, sehingga nilainya menyisipkan newline dan memecah satu
+# direktif menjadi 30 baris. systemd lalu menolak seluruh unit dengan
+# "Unbalanced quoting" pada baris ExecStartPost, dan tunnelnya tak pernah naik.
+# Terjadi 28 Sep 2026. Brace expansion {1..30} tak punya tanda dolar, jadi ia lewat
+# heredoc apa adanya dan baru dievaluasi bash saat unit dijalankan.
+#
+# Backslash di atas bukan kerapian: KOMENTAR pun diekspansi di heredoc tak
+# berkutip. Menulis peringatan ini tanpa escape MEREPRODUKSI bug yang
+# diperingatkannya — itu benar-benar terjadi saat menambalnya.
+#
+# Hal yang sama berlaku untuk BACKTICK: heredoc tak berkutip menjalankannya juga,
+# bahkan di dalam komentar. Karena itu tak ada backtick maupun dolar tak-ter-escape
+# di blok unit ini; pakai kutip tunggal untuk mengutip nama perintah.
+ExecStartPost=/bin/bash -c 'for _ in {1..30}; do ip -4 -o addr show 2>/dev/null | grep -qE "^[0-9]+: ppp" && exit 0; sleep 1; done; echo "GAGAL: tunnel $TUNNEL_NAME tidak naik dalam 30 detik — tak ada alamat di antarmuka ppp mana pun." >&2; echo "       Sebab paling sering: PPP secret \"$VPN_USER\" BELUM ADA di concentrator $VPN_HOST." >&2; echo "       Tempel dulu skrip concentrator (VPN Concentrator -> Setup Script -> \"RADIUS di dalam VPN\"), lalu: systemctl restart l2tp-$TUNNEL_NAME" >&2; echo "       Periksa sebabnya: journalctl -u xl2tpd -n 50 --no-pager" >&2; exit 1'
 ExecStop=/bin/bash -c 'echo "d $TUNNEL_NAME" > /var/run/xl2tpd/l2tp-control'
 $UNIT_STOPPOST
 
