@@ -18,6 +18,22 @@ server {{ .InstanceName }} {
             lifetime        = 0
             idle_timeout    = 30
         }
+
+{{- if .DynamicClientNet }}
+        # NAS DINAMIS — dibaca dari tabel `nas` saat paket pertama tiba,
+        # tanpa restart FreeRADIUS.
+        #
+        # Blok ini SENGAJA di dalam listen, bukan global: di mesin ini satu
+        # FreeRADIUS melayani BANYAK instance, dan yang membedakannya adalah
+        # PORT — bukan alamat NAS. Blok client global akan membuat paket dari
+        # satu NAS bisa dicocokkan oleh instance mana pun yang jaringannya
+        # bertumpang tindih, dan yang menang adalah yang kebetulan lebih dulu.
+        client dynamic_{{ .InstanceName }} {
+            ipaddr          = {{ .DynamicClientNet }}
+            dynamic_clients = dynclients_{{ .InstanceName }}
+            lifetime        = 600
+        }
+{{- end }}
     }
 
     listen {
@@ -29,6 +45,22 @@ server {{ .InstanceName }} {
             lifetime        = 0
             idle_timeout    = 30
         }
+
+{{- if .DynamicClientNet }}
+        # NAS DINAMIS — dibaca dari tabel `nas` saat paket pertama tiba,
+        # tanpa restart FreeRADIUS.
+        #
+        # Blok ini SENGAJA di dalam listen, bukan global: di mesin ini satu
+        # FreeRADIUS melayani BANYAK instance, dan yang membedakannya adalah
+        # PORT — bukan alamat NAS. Blok client global akan membuat paket dari
+        # satu NAS bisa dicocokkan oleh instance mana pun yang jaringannya
+        # bertumpang tindih, dan yang menang adalah yang kebetulan lebih dulu.
+        client dynamic_{{ .InstanceName }} {
+            ipaddr          = {{ .DynamicClientNet }}
+            dynamic_clients = dynclients_{{ .InstanceName }}
+            lifetime        = 600
+        }
+{{- end }}
     }
 
     listen {
@@ -123,3 +155,51 @@ server {{ .InstanceName }} {
         ok
     }
 }
+
+{{- if .DynamicClientNet }}
+
+# ============================================================================
+# Virtual server pencari NAS dinamis untuk instance ini.
+#
+# Dipicu FreeRADIUS saat paket tiba dari IP di dalam {{ .DynamicClientNet }}
+# yang BELUM ada di daftar client. Ia mencari barisnya di tabel `nas`; kalau
+# ketemu, NAS itu di-cache beserta secret-nya dan permintaannya diproses
+# normal. Kalau tidak ketemu, permintaannya ditolak.
+#
+# Akibatnya NAS yang baru ditambahkan lewat API langsung terpakai TANPA restart
+# FreeRADIUS. Sebelum ini, `read_clients = yes` hanya memuat daftar NAS saat
+# start, jadi NAS baru adalah client tak dikenal dan paketnya DIBUANG tanpa
+# balasan dan tanpa log — gejalanya "radius timeout" di router, yang juga
+# gejala belasan hal lain. Tak ada jalur kode mana pun yang me-restart
+# FreeRADIUS saat NAS ditambah, jadi itu langkah manual yang harus diingat.
+#
+# DUA HAL YANG TIDAK BOLEH DISALIN MENTAH dari contoh FreeRADIUS mana pun:
+#
+#   1. Modulnya HARUS sql_{{ .InstanceName }}, bukan `sql`. Tiap instance di
+#      mesin ini punya modul SQL sendiri yang menunjuk DATABASE-nya sendiri;
+#      memakai `sql` berarti mencari NAS di database instance yang salah.
+#   2. FreeRADIUS-Client-Virtual-Server HARUS {{ .InstanceName }}, bukan
+#      "default". Kalau salah, permintaannya diproses virtual server lain —
+#      pelanggan milik mitra A diautentikasi terhadap data mitra B.
+#
+# Rate limit DoS: FreeRADIUS membatasi 1 client baru per detik. Hard-coded,
+# tidak bisa diubah.
+# ============================================================================
+server dynclients_{{ .InstanceName }} {
+    authorize {
+        if ("%{sql_{{ .InstanceName }}: SELECT nasname FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}") {
+            update control {
+                &FreeRADIUS-Client-IP-Address     = "%{Packet-Src-IP-Address}"
+                &FreeRADIUS-Client-Shortname      = "%{sql_{{ .InstanceName }}: SELECT COALESCE(shortname, nasname) FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}"
+                &FreeRADIUS-Client-Secret         = "%{sql_{{ .InstanceName }}: SELECT secret FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}"
+                &FreeRADIUS-Client-NAS-Type       = "%{sql_{{ .InstanceName }}: SELECT COALESCE(type, 'other') FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}"
+                &FreeRADIUS-Client-Virtual-Server = "{{ .InstanceName }}"
+            }
+            ok
+        }
+        else {
+            reject
+        }
+    }
+}
+{{- end }}

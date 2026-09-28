@@ -249,6 +249,7 @@ func runServe() error {
 		}
 		fs := system.NewRealFilesystem()
 		managerCfg.FS = fs
+		managerCfg.DynamicClientNet = cfg.DynamicClientNet
 
 		// Optional v0.2.0 bootstrap. Skipped when RM_API_BOOTSTRAP_REPO empty,
 		// preserving v0.1.x behavior where the API directory is provisioned

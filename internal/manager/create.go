@@ -114,6 +114,8 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 		AcctPort:     acctPort,
 		CoAPort:      coaPort,
 		InnerPort:    innerPort,
+
+		DynamicClientNet: i.cfg.DynamicClientNet,
 	}
 
 	type renderJob struct {

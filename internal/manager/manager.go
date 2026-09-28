@@ -59,6 +59,11 @@ type Config struct {
 	// API hosting paths (matches radius-manager.sh):
 	APIDirBase string // default "/root"; per-instance dir = APIDirBase/{name}-api
 
+	// DynamicClientNet — jaringan NAS dinamis, diteruskan ke template
+	// virtual server. Kosong = fitur mati (perilaku lama).
+	// Lihat templates.Vars.DynamicClientNet.
+	DynamicClientNet string
+
 	// Listening IP that goes into WEB_API_URL written to .instance_<name>.
 	APIPublishIP string // default "0.0.0.0"
 

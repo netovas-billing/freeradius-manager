@@ -89,6 +89,10 @@ type Config struct {
 	BootstrapGoRef         string // RM_API_GO_REF — tag/branch/commit yang dipaku
 	BootstrapGoTemplateDir string // RM_API_GO_TEMPLATE_DIR
 
+	// DynamicClientNet — RM_API_DYNAMIC_CLIENT_NET, mis. "172.31.199.0/24".
+	// Kosong = fitur mati (perilaku lama). Lihat templates.Vars.DynamicClientNet.
+	DynamicClientNet string
+
 	// SystemdBackend selects which Systemctl implementation runs the
 	// per-instance freeradius-api units. Production Linux defaults to
 	// "systemd"; the Docker dev stack sets "supervisord" because the
@@ -148,6 +152,7 @@ func Load() (*Config, error) {
 		BootstrapGoRepo:        getenv("RM_API_GO_REPO", "https://github.com/netovas-billing/freeradius-api"),
 		BootstrapGoRef:         os.Getenv("RM_API_GO_REF"),
 		BootstrapGoTemplateDir: getenv("RM_API_GO_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-go-template"),
+		DynamicClientNet:       strings.TrimSpace(os.Getenv("RM_API_DYNAMIC_CLIENT_NET")),
 		SystemdBackend:         strings.ToLower(getenv("RM_API_SYSTEMD_BACKEND", "systemd")),
 		InstanceDBHost:         getenv("RM_API_INSTANCE_DB_HOST", "localhost"),
 		MaintenanceBackend:     strings.ToLower(getenv("RM_API_MAINTENANCE_BACKEND", "systemd")),
