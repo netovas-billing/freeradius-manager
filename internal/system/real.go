@@ -91,8 +91,12 @@ func NewRealFreeRADIUS(s Systemctl) *RealFreeRADIUS {
 	return &RealFreeRADIUS{Systemctl: s, UnitName: "freeradius"}
 }
 
-func (f *RealFreeRADIUS) Reload(ctx context.Context) error  { return f.Systemctl.Restart(ctx, f.UnitName) }
-func (f *RealFreeRADIUS) Restart(ctx context.Context) error { return f.Systemctl.Restart(ctx, f.UnitName) }
+func (f *RealFreeRADIUS) Reload(ctx context.Context) error {
+	return f.Systemctl.Restart(ctx, f.UnitName)
+}
+func (f *RealFreeRADIUS) Restart(ctx context.Context) error {
+	return f.Systemctl.Restart(ctx, f.UnitName)
+}
 
 // RealFilesystem performs real OS file operations. All paths must be
 // absolute to avoid surprises.
@@ -148,6 +152,34 @@ func (RealFilesystem) Chown(_ context.Context, path, user, group string) error {
 // CopyDir recursively copies src into dst. Walks src and replicates the
 // tree at dst. Preserves file mode bits but does not preserve owner
 // (filesystem chown happens via Chown explicitly).
+// CopyFile menyalin satu berkas, membuat direktori tujuannya bila perlu.
+func (RealFilesystem) CopyFile(_ context.Context, src, dst string, mode uint32) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open src %s: %w", src, err)
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(mode))
+	if err != nil {
+		return fmt.Errorf("create dst %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	// Chmod eksplisit: O_CREATE menghormati umask, jadi mode di atas belum pasti.
+	if err := os.Chmod(dst, os.FileMode(mode)); err != nil {
+		return fmt.Errorf("chmod %s: %w", dst, err)
+	}
+	return nil
+}
+
 func (RealFilesystem) CopyDir(_ context.Context, src, dst string) error {
 	srcInfo, err := os.Stat(src)
 	if err != nil {
@@ -245,6 +277,26 @@ func (g *RealGit) Clone(ctx context.Context, repoURL, dir string) error {
 	return nil
 }
 
+// CloneRef meng-clone lalu memaku checkout ke ref (tag/branch/commit).
+// ref kosong → sama dengan Clone.
+func (g *RealGit) CloneRef(ctx context.Context, repoURL, ref, dir string) error {
+	if strings.TrimSpace(ref) == "" {
+		return g.Clone(ctx, repoURL, dir)
+	}
+	// Clone penuh dulu: --branch tidak menerima SHA commit, sementara ref di
+	// sini boleh berupa tag, branch, ATAU commit. Satu `checkout` sesudahnya
+	// menangani ketiganya tanpa cabang khusus.
+	if err := g.Clone(ctx, repoURL, dir); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, g.bin(), "-C", dir, "checkout", "--quiet", ref)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git checkout %s in %s: %w; output: %s", ref, dir, err, out)
+	}
+	return nil
+}
+
 func (g *RealGit) Pull(ctx context.Context, dir string) error {
 	cmd := exec.CommandContext(ctx, g.bin(), "-C", dir, "pull", "--quiet", "--ff-only")
 	out, err := cmd.CombinedOutput()
@@ -291,6 +343,49 @@ func (p *RealPython) PipInstall(ctx context.Context, venvDir, requirementsFile s
 	if err != nil {
 		return fmt.Errorf("pip install -r %s in %s: %w; output: %s",
 			requirementsFile, venvDir, err, out)
+	}
+	return nil
+}
+
+// RealGo menjalankan toolchain Go yang sudah dipasang install.sh di
+// /usr/local/go (lihat install.sh: unduh + ekstrak + tambah ke PATH).
+type RealGo struct {
+	Bin string // default: cari /usr/local/go/bin/go lalu "go" di PATH
+}
+
+func NewRealGo() *RealGo { return &RealGo{} }
+
+func (g *RealGo) bin() string {
+	if g.Bin != "" {
+		return g.Bin
+	}
+	// install.sh memasangnya di sini, dan PATH unit systemd belum tentu
+	// memuatnya — jadi jalur absolutnya dicoba lebih dulu.
+	if _, err := os.Stat("/usr/local/go/bin/go"); err == nil {
+		return "/usr/local/go/bin/go"
+	}
+	return "go"
+}
+
+// Build menjalankan `go build -mod=vendor -o outBin .` di dalam pkgDir.
+//
+// GOFLAGS/-mod=vendor dan GOPROXY=off keduanya disetel dengan sengaja: build
+// ini TIDAK BOLEH menyentuh jaringan. VM RADIUS duduk di belakang VPN dengan
+// egress tersaring (terbukti 28 Sep 2026: apk gagal "Permission denied" ke
+// dl-cdn.alpinelinux.org padahal Docker Hub jalan), dan menarik modul saat
+// provisioning juga berarti dua instance bisa menjalankan kode berbeda.
+func (g *RealGo) Build(ctx context.Context, pkgDir, outBin string) error {
+	cmd := exec.CommandContext(ctx, g.bin(), "build", "-mod=vendor", "-o", outBin, ".")
+	cmd.Dir = pkgDir
+	cmd.Env = append(os.Environ(),
+		"GOPROXY=off",
+		"GOFLAGS=-mod=vendor",
+		// HOME kadang tak diset di konteks systemd, dan go butuh cache.
+		"GOCACHE=/var/cache/radius-manager-api/go-build",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("go build in %s -> %s: %w; output: %s", pkgDir, outBin, err, out)
 	}
 	return nil
 }

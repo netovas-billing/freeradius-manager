@@ -17,10 +17,10 @@ type Call struct {
 // MockSystemctl is a thread-safe in-memory Systemctl implementation that
 // records every call and supports per-method failure injection.
 type MockSystemctl struct {
-	mu       sync.Mutex
-	Calls    []Call
+	mu          sync.Mutex
+	Calls       []Call
 	UnitContent map[string]string // captured WriteUnit payloads
-	Active   map[string]bool     // backing for IsActive
+	Active      map[string]bool   // backing for IsActive
 
 	// Failures: if a method name maps to a non-nil error, that call returns it.
 	Failures map[string]error
@@ -251,6 +251,23 @@ type mockDirs struct {
 	dirs map[string]string // dst -> src lineage (for assertions)
 }
 
+func (m *MockFilesystem) CopyFile(_ context.Context, src, dst string, mode uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = append(m.Calls, Call{Method: "CopyFile", Args: []string{src, dst}})
+	if err := m.Failures["CopyFile"]; err != nil {
+		return err
+	}
+	// Salin isi kalau sumbernya dikenal; kalau tidak, tandai saja keberadaannya
+	// supaya Exists(dst) benar (biner hasil build tak punya isi di mock).
+	if isi, ok := m.Files[src]; ok {
+		m.Files[dst] = isi
+	} else {
+		m.Files[dst] = []byte{}
+	}
+	return nil
+}
+
 func (m *MockFilesystem) CopyDir(_ context.Context, src, dst string) error {
 	m.mu.Lock()
 	m.Calls = append(m.Calls, Call{Method: "CopyDir", Args: []string{src, dst}})
@@ -303,12 +320,14 @@ type MockGit struct {
 	mu       sync.Mutex
 	Calls    []Call
 	Repos    map[string]string // dir -> repoURL
+	Refs     map[string]string // dir -> ref yang dipaku (CloneRef)
 	Failures map[string]error
 }
 
 func NewMockGit() *MockGit {
 	return &MockGit{
 		Repos:    map[string]string{},
+		Refs:     map[string]string{},
 		Failures: map[string]error{},
 	}
 }
@@ -323,6 +342,18 @@ func (g *MockGit) Clone(_ context.Context, repoURL, dir string) error {
 	g.Repos[dir] = repoURL
 	g.mu.Unlock()
 	return nil
+}
+
+func (g *MockGit) CloneRef(ctx context.Context, repoURL, ref, dir string) error {
+	g.mu.Lock()
+	g.Calls = append(g.Calls, Call{Method: "CloneRef", Args: []string{repoURL, ref, dir}})
+	if err := g.Failures["CloneRef"]; err != nil {
+		g.mu.Unlock()
+		return err
+	}
+	g.Refs[dir] = ref
+	g.mu.Unlock()
+	return g.Clone(ctx, repoURL, dir)
 }
 
 func (g *MockGit) Pull(_ context.Context, dir string) error {
@@ -364,4 +395,31 @@ func (p *MockPython) PipInstall(_ context.Context, venvDir, requirementsFile str
 	p.Calls = append(p.Calls, Call{Method: "PipInstall", Args: []string{venvDir, requirementsFile}})
 	p.mu.Unlock()
 	return p.Failures["PipInstall"]
+}
+
+// MockGo mencatat build biner Go.
+type MockGo struct {
+	mu       sync.Mutex
+	Calls    []Call
+	Built    map[string]string // outBin -> pkgDir
+	Failures map[string]error
+}
+
+func NewMockGo() *MockGo {
+	return &MockGo{
+		Built:    map[string]string{},
+		Failures: map[string]error{},
+	}
+}
+
+func (g *MockGo) Build(_ context.Context, pkgDir, outBin string) error {
+	g.mu.Lock()
+	g.Calls = append(g.Calls, Call{Method: "Build", Args: []string{pkgDir, outBin}})
+	if err := g.Failures["Build"]; err != nil {
+		g.mu.Unlock()
+		return err
+	}
+	g.Built[outBin] = pkgDir
+	g.mu.Unlock()
+	return nil
 }

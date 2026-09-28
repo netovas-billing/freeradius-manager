@@ -48,6 +48,12 @@ type Filesystem interface {
 	// merge. Used by template-once strategy for freeradius-api.
 	CopyDir(ctx context.Context, src, dst string) error
 
+	// CopyFile copies a single file, preserving mode. Dipakai runtime Go:
+	// yang perlu ada di direktori instance cuma BINER-nya, bukan seluruh
+	// pohon sumber. Menyalin sumbernya per instance berarti ~34 MB vendor
+	// dikali jumlah instance (maks 43 per VM) tanpa guna sama sekali.
+	CopyFile(ctx context.Context, src, dst string, mode uint32) error
+
 	// RemoveDir removes a directory tree. Idempotent.
 	RemoveDir(ctx context.Context, path string) error
 
@@ -65,9 +71,28 @@ type Git interface {
 	// dir must not exist or must be empty.
 	Clone(ctx context.Context, repoURL, dir string) error
 
+	// CloneRef seperti Clone tapi memaku checkout ke ref tertentu (tag,
+	// branch, atau commit). ref kosong = perilaku Clone.
+	//
+	// Ada karena Clone menarik BRANCH BAWAAN apa adanya: dua VM yang
+	// di-provision pada hari berbeda bisa menjalankan kode berbeda, dan tak ada
+	// yang mencatatnya. Untuk kode yang jalan sebagai root di setiap VM RADIUS,
+	// itu bukan detail.
+	CloneRef(ctx context.Context, repoURL, ref, dir string) error
+
 	// Pull updates an existing checkout to the latest commit on the
 	// current branch. No-op if dir is not a git repo.
 	Pull(ctx context.Context, dir string) error
+}
+
+// GoToolchain membangun biner Go di VM.
+//
+// Toolchain-nya sudah dipasang install.sh (mengunduh go ke /usr/local/go), jadi
+// ini tidak menambah dependensi baru. Build-nya -mod=vendor supaya TIDAK butuh
+// jaringan: VM RADIUS duduk di belakang VPN dengan egress tersaring.
+type GoToolchain interface {
+	// Build menjalankan `go build -mod=vendor -o outBin .` di dalam pkgDir.
+	Build(ctx context.Context, pkgDir, outBin string) error
 }
 
 // Python wraps Python tooling needed to set up the per-instance

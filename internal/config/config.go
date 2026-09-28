@@ -54,6 +54,18 @@ type Config struct {
 	BootstrapTemplateDir string // RM_API_BOOTSTRAP_TEMPLATE_DIR, e.g. /var/lib/radius-manager-api/freeradius-api-template
 	BootstrapSkipPull    bool   // RM_API_BOOTSTRAP_SKIP_PULL=true to disable git pull on EnsureTemplate
 
+	// APIRuntime — aplikasi freeradius-api yang dipasang per instance:
+	// "python" (BAWAAN, perilaku hari ini) atau "go".
+	//
+	// Bawaannya python dengan sengaja: menambahkan opsi ini tidak boleh mengubah
+	// apa pun sampai operator memintanya secara eksplisit.
+	APIRuntime string // RM_API_RUNTIME
+
+	// Dipakai hanya saat APIRuntime="go".
+	BootstrapGoRepo        string // RM_API_GO_REPO
+	BootstrapGoRef         string // RM_API_GO_REF — tag/branch/commit yang dipaku
+	BootstrapGoTemplateDir string // RM_API_GO_TEMPLATE_DIR
+
 	// SystemdBackend selects which Systemctl implementation runs the
 	// per-instance freeradius-api units. Production Linux defaults to
 	// "systemd"; the Docker dev stack sets "supervisord" because the
@@ -95,26 +107,30 @@ type Config struct {
 
 func Load() (*Config, error) {
 	c := &Config{
-		Listen:        getenv("RM_API_LISTEN", "127.0.0.1:9000"),
-		TokenFile:     os.Getenv("RM_API_TOKEN_FILE"),
-		Token:         os.Getenv("RM_API_TOKEN"),
-		FreeRADIUSDir: getenv("RM_API_FREERADIUS_DIR", "/etc/freeradius/3.0"),
-		StateDir:      getenv("RM_API_STATE_DIR", "/var/lib/radius-manager-api"),
-		VPNIP:         os.Getenv("RM_API_VPN_IP"),
-		LogFormat:     strings.ToLower(getenv("RM_API_LOG_FORMAT", "json")),
-		AuditLogPath:  getenv("RM_API_AUDIT_LOG", "/var/log/radius-manager-api/audit.log"),
-		APIDirBase:           getenv("RM_API_API_DIR_BASE", "/root"),
-		APIPublishIP:         getenv("RM_API_API_PUBLISH_IP", ""),
-		DBDSN:                os.Getenv("RM_API_DB_DSN"),
-		BootstrapAPIRepo:     os.Getenv("RM_API_BOOTSTRAP_REPO"),
-		BootstrapTemplateDir: getenv("RM_API_BOOTSTRAP_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-template"),
-		BootstrapSkipPull:    strings.EqualFold(os.Getenv("RM_API_BOOTSTRAP_SKIP_PULL"), "true"),
-		SystemdBackend:       strings.ToLower(getenv("RM_API_SYSTEMD_BACKEND", "systemd")),
-		InstanceDBHost:       getenv("RM_API_INSTANCE_DB_HOST", "localhost"),
-		MaintenanceBackend:   strings.ToLower(getenv("RM_API_MAINTENANCE_BACKEND", "systemd")),
-		S3Remote:             os.Getenv("RM_API_S3_REMOTE"),
-		S3Bucket:             os.Getenv("RM_API_S3_BUCKET"),
-		S3BackupRoot:         getenv("RM_API_S3_BACKUP_ROOT", "radiusdb"),
+		Listen:                 getenv("RM_API_LISTEN", "127.0.0.1:9000"),
+		TokenFile:              os.Getenv("RM_API_TOKEN_FILE"),
+		Token:                  os.Getenv("RM_API_TOKEN"),
+		FreeRADIUSDir:          getenv("RM_API_FREERADIUS_DIR", "/etc/freeradius/3.0"),
+		StateDir:               getenv("RM_API_STATE_DIR", "/var/lib/radius-manager-api"),
+		VPNIP:                  os.Getenv("RM_API_VPN_IP"),
+		LogFormat:              strings.ToLower(getenv("RM_API_LOG_FORMAT", "json")),
+		AuditLogPath:           getenv("RM_API_AUDIT_LOG", "/var/log/radius-manager-api/audit.log"),
+		APIDirBase:             getenv("RM_API_API_DIR_BASE", "/root"),
+		APIPublishIP:           getenv("RM_API_API_PUBLISH_IP", ""),
+		DBDSN:                  os.Getenv("RM_API_DB_DSN"),
+		BootstrapAPIRepo:       os.Getenv("RM_API_BOOTSTRAP_REPO"),
+		BootstrapTemplateDir:   getenv("RM_API_BOOTSTRAP_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-template"),
+		BootstrapSkipPull:      strings.EqualFold(os.Getenv("RM_API_BOOTSTRAP_SKIP_PULL"), "true"),
+		APIRuntime:             getenv("RM_API_RUNTIME", "python"),
+		BootstrapGoRepo:        os.Getenv("RM_API_GO_REPO"),
+		BootstrapGoRef:         os.Getenv("RM_API_GO_REF"),
+		BootstrapGoTemplateDir: getenv("RM_API_GO_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-go-template"),
+		SystemdBackend:         strings.ToLower(getenv("RM_API_SYSTEMD_BACKEND", "systemd")),
+		InstanceDBHost:         getenv("RM_API_INSTANCE_DB_HOST", "localhost"),
+		MaintenanceBackend:     strings.ToLower(getenv("RM_API_MAINTENANCE_BACKEND", "systemd")),
+		S3Remote:               os.Getenv("RM_API_S3_REMOTE"),
+		S3Bucket:               os.Getenv("RM_API_S3_BUCKET"),
+		S3BackupRoot:           getenv("RM_API_S3_BACKUP_ROOT", "radiusdb"),
 	}
 	// Sengaja TIDAK mengembalikan error: nilai yang aneh cukup diabaikan dan
 	// mesin tetap naik dengan blok port bawaan. Tapi nilai mentahnya disimpan

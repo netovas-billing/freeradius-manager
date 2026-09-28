@@ -177,6 +177,7 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 			DBPass:       dbPass,
 			SwaggerUser:  "admin",
 			SwaggerPass:  swPass,
+			APIPort:      apiPort,
 		}
 		if err := i.cfg.APIBootstrap.SetupInstance(ctx, setupParams); err != nil {
 			return nil, fmt.Errorf("bootstrap api dir %s: %w", apiDir, err)
@@ -199,6 +200,26 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 	// exist on disk after bootstrap, so a timer pointing at them would
 	// fire and ENOENT). Removal happens in DeleteInstance.
 	if i.cfg.Maintenance != nil && i.cfg.APIBootstrap != nil {
+		// GAGAL-KERAS untuk runtime Go selama skripnya belum ada.
+		//
+		// Timer pemeliharaan menunjuk autoclearzombie.sh dan autobackups3.sh DI
+		// DALAM direktori instance. Kedua skrip itu milik repo PYTHON; repo Go
+		// belum membawanya. Kalau dibiarkan, timernya terpasang lalu ENOENT tiap
+		// kali berjalan — artinya instance itu jalan TANPA pembersih sesi zombie
+		// dan TANPA backup basis data, dan kegagalannya hanya terlihat oleh yang
+		// membaca log timer. Kehilangan backup yang tak disadari jauh lebih mahal
+		// daripada create yang gagal dengan pesan jelas.
+		if i.cfg.APIBootstrap.PakaiGo() {
+			for _, skrip := range []string{"autoclearzombie.sh", "autobackups3.sh"} {
+				ada, _ := i.cfg.FS.Exists(ctx, filepath.Join(apiDir, skrip))
+				if !ada {
+					return nil, fmt.Errorf("runtime go: %s tidak ada di %s — "+
+						"timer pemeliharaan akan ENOENT dan instance ini akan jalan tanpa "+
+						"backup basis data; pindahkan skrip pemeliharaan ke repo Go dulu, "+
+						"atau jalankan tanpa Maintenance", skrip, apiDir)
+				}
+			}
+		}
 		if err := i.cfg.Maintenance.SetupForInstance(ctx, name, MaintenanceCreds{
 			DBHost: dbHost,
 			DBPort: dbPort,
@@ -216,6 +237,9 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 	// ---- Step 7: write systemd unit + start ----
 	unitName := name + "-api.service"
 	unitContent := i.renderAPIServiceUnit(name, apiDir, apiPort)
+	if i.cfg.APIBootstrap != nil && i.cfg.APIBootstrap.PakaiGo() {
+		unitContent = i.renderAPIServiceUnitGo(name, apiDir)
+	}
 	if err := i.cfg.Systemctl.WriteUnit(ctx, unitName, unitContent); err != nil {
 		return nil, fmt.Errorf("write unit %s: %w", unitName, err)
 	}
@@ -352,6 +376,36 @@ SyslogIdentifier=%s-api
 [Install]
 WantedBy=multi-user.target
 `, name, apiDir, apiDir, apiPort, name)
+}
+
+// renderAPIServiceUnitGo — unit systemd untuk instance dengan runtime Go.
+//
+// Yang DISENGAJA SAMA dengan unit uvicorn, dan jangan diubah: nama unit
+// (<nama>-api.service, dirakit pemanggil) dan WorkingDirectory. Nama unit sama
+// berarti start/stop/restart/delete, health check, dan aturan dst-nat di
+// concentrator tidak perlu tahu runtime mana yang dipakai — satu hal yang
+// membuat perpindahan ini bisa dibatalkan per instance.
+//
+// Port TIDAK ada di baris perintah: ia dibaca dari PORT di .env, yang dimuat
+// aplikasi dari WorkingDirectory (godotenv membaca ./.env). Menaruhnya di dua
+// tempat berarti suatu hari keduanya berbeda.
+func (i *impl) renderAPIServiceUnitGo(name, apiDir string) string {
+	return fmt.Sprintf(`[Unit]
+Description=RadiusAPI (Go) - %s
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=%s
+ExecStart=%s/%s
+Restart=always
+RestartSec=5
+SyslogIdentifier=%s-api
+
+[Install]
+WantedBy=multi-user.target
+`, name, apiDir, apiDir, namaBinerGo, name)
 }
 
 func derefStr(p *string) string {

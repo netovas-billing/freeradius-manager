@@ -228,20 +228,46 @@ func runServe() error {
 		// Optional v0.2.0 bootstrap. Skipped when RM_API_BOOTSTRAP_REPO empty,
 		// preserving v0.1.x behavior where the API directory is provisioned
 		// out of band (e.g., by radius-manager.sh).
-		if cfg.BootstrapAPIRepo != "" {
+		// Gerbangnya melihat KEDUA repo: saat RM_API_RUNTIME=go, repo Python
+		// boleh kosong dan yang terisi justru RM_API_GO_REPO.
+		pakaiGo := strings.EqualFold(strings.TrimSpace(cfg.APIRuntime), manager.RuntimeGo)
+		if cfg.BootstrapAPIRepo != "" || (pakaiGo && cfg.BootstrapGoRepo != "") {
 			managerCfg.APIBootstrap = &manager.FreeRADIUSAPIBootstrap{
 				RepoURL:     cfg.BootstrapAPIRepo,
 				TemplateDir: cfg.BootstrapTemplateDir,
 				SkipPull:    cfg.BootstrapSkipPull,
-				Git:         system.NewRealGit(),
-				Python:      system.NewRealPython(),
-				FS:          fs,
+
+				Runtime:       cfg.APIRuntime,
+				GoRepoURL:     cfg.BootstrapGoRepo,
+				GoRef:         cfg.BootstrapGoRef,
+				GoTemplateDir: cfg.BootstrapGoTemplateDir,
+
+				Git:    system.NewRealGit(),
+				Python: system.NewRealPython(),
+				Go:     system.NewRealGo(),
+				FS:     fs,
 			}
-			logger.Info("freeradius-api bootstrap enabled",
-				slog.String("repo", cfg.BootstrapAPIRepo),
-				slog.String("template_dir", cfg.BootstrapTemplateDir),
-				slog.Bool("skip_pull", cfg.BootstrapSkipPull),
-			)
+			if pakaiGo {
+				// Versi yang dipasang dicatat sekali di boot: tanpa RM_API_GO_REF
+				// yang di-pin, `git clone` mengambil branch bawaan apa adanya dan
+				// "instance ini menjalankan kode yang mana" tak terjawab nanti.
+				ref := cfg.BootstrapGoRef
+				if ref == "" {
+					ref = "(branch bawaan — TIDAK dipaku)"
+				}
+				logger.Info("freeradius-api bootstrap enabled (runtime GO)",
+					slog.String("repo", cfg.BootstrapGoRepo),
+					slog.String("ref", ref),
+					slog.String("template_dir", cfg.BootstrapGoTemplateDir),
+					slog.Bool("skip_pull", cfg.BootstrapSkipPull),
+				)
+			} else {
+				logger.Info("freeradius-api bootstrap enabled",
+					slog.String("repo", cfg.BootstrapAPIRepo),
+					slog.String("template_dir", cfg.BootstrapTemplateDir),
+					slog.Bool("skip_pull", cfg.BootstrapSkipPull),
+				)
+			}
 		}
 
 		// v0.3.0 maintenance timers. Independent backend selection from
