@@ -87,6 +87,15 @@ const (
 	subdirPaketGo = "api"
 )
 
+// skripPemeliharaan — skrip yang HARUS ikut mendarat di direktori instance.
+//
+// Timer pemeliharaan menunjuk keduanya DI DALAM direktori instance, dan
+// PatchScripts menambal kredensialnya di tempat. Pada jalur Python keduanya ikut
+// lewat CopyDir seluruh pohon; pada jalur Go hanya biner yang disalin, jadi
+// keduanya harus disebut eksplisit — kalau tidak, timernya ENOENT dan instance
+// jalan tanpa pembersih zombie dan tanpa backup basis data.
+var skripPemeliharaan = []string{"autoclearzombie.sh", "autobackups3.sh"}
+
 // PakaiGo melaporkan apakah instance dipasang dengan runtime Go.
 func (b *FreeRADIUSAPIBootstrap) PakaiGo() bool {
 	return strings.EqualFold(strings.TrimSpace(b.Runtime), RuntimeGo)
@@ -250,6 +259,22 @@ func (b *FreeRADIUSAPIBootstrap) setupInstanceGo(ctx context.Context, p SetupIns
 	binInstance := filepath.Join(p.APIDir, namaBinerGo)
 	if err := b.FS.CopyFile(ctx, binTemplate, binInstance, 0o755); err != nil {
 		return fmt.Errorf("salin biner ke %s: %w", binInstance, err)
+	}
+
+	// Skrip pemeliharaan ikut, mode 0700 seperti jalur bash (yang menulisnya
+	// dengan WriteFile 0o700). Absen di template = gagal KERAS, bukan dilewati:
+	// instance tanpa backup basis data yang tak disadari jauh lebih mahal
+	// daripada create yang gagal dengan pesan jelas.
+	for _, skrip := range skripPemeliharaan {
+		asal := filepath.Join(b.GoTemplateDir, skrip)
+		ada, _ := b.FS.Exists(ctx, asal)
+		if !ada {
+			return fmt.Errorf("skrip pemeliharaan %s tidak ada di template %s — "+
+				"instance akan jalan tanpa backup basis data", skrip, b.GoTemplateDir)
+		}
+		if err := b.FS.CopyFile(ctx, asal, filepath.Join(p.APIDir, skrip), 0o700); err != nil {
+			return fmt.Errorf("salin %s: %w", skrip, err)
+		}
 	}
 
 	envContent, err := renderAPIEnvFileGo(p)

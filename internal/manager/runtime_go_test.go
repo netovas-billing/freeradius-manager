@@ -24,6 +24,11 @@ func bootstrapGo() (*FreeRADIUSAPIBootstrap, *system.MockGit, *system.MockPython
 		Go:            gо,
 		FS:            fs,
 	}
+	// Prasyarat: skrip pemeliharaan HARUS ada di template, kalau tidak
+	// setupInstanceGo menolak (instance tanpa backup DB = tak boleh terjadi).
+	for _, skrip := range skripPemeliharaan {
+		fs.PresetExists[b.GoTemplateDir+"/"+skrip] = true
+	}
 	return b, g, py, gо, fs
 }
 
@@ -269,6 +274,45 @@ func TestUnitSystemdPythonTidakBerubah(t *testing.T) {
 	} {
 		if !strings.Contains(unit, wajib) {
 			t.Fatalf("unit Python berubah — instance yang sudah jalan memakai bentuk ini.\nhilang: %q\n%s", wajib, unit)
+		}
+	}
+}
+
+// Skrip pemeliharaan absen di template → create GAGAL, dan tidak ada .env yang
+// tertulis. Ini penjaga terhadap kegagalan yang paling mahal di jalur ini:
+// instance yang jalan tanpa backup basis data, gagal senyap di timer, dan baru
+// diketahui pada saat backup-nya dibutuhkan.
+func TestRuntimeGo_SkripPemeliharaanWajibAdaDiTemplate(t *testing.T) {
+	for _, hilang := range skripPemeliharaan {
+		b, _, _, _, fs := bootstrapGo()
+		delete(fs.PresetExists, b.GoTemplateDir+"/"+hilang)
+
+		err := b.SetupInstance(context.Background(), paramsUji())
+		if err == nil {
+			t.Fatalf("%s hilang tapi create diterima", hilang)
+		}
+		if !strings.Contains(err.Error(), hilang) {
+			t.Fatalf("pesan galat tidak menyebut %s: %v", hilang, err)
+		}
+		if !strings.Contains(err.Error(), "backup") {
+			t.Fatalf("pesan galat tidak menjelaskan akibatnya: %v", err)
+		}
+		if _, ada := fs.Files["/root/mitra_x-api/.env"]; ada {
+			t.Fatalf(".env tertulis padahal %s hilang — instance separuh jadi", hilang)
+		}
+	}
+}
+
+// Dan saat ada, keduanya harus BENAR-BENAR mendarat di direktori instance:
+// timer menunjuk ke sana, dan PatchScripts menambal kredensialnya di tempat.
+func TestRuntimeGo_SkripPemeliharaanDisalinKeInstance(t *testing.T) {
+	b, _, _, _, fs := bootstrapGo()
+	if err := b.SetupInstance(context.Background(), paramsUji()); err != nil {
+		t.Fatal(err)
+	}
+	for _, skrip := range skripPemeliharaan {
+		if _, ada := fs.Files["/root/mitra_x-api/"+skrip]; !ada {
+			t.Fatalf("%s tidak disalin ke direktori instance; Files=%v", skrip, kunci(fs.Files))
 		}
 	}
 }
