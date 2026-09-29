@@ -38,11 +38,18 @@ Debian/Ubuntu bersih — **`install.sh`**, bukan `docker compose`. Berkas
 `docker-compose.dev.yml` hanya untuk uji coba di laptop (`make docker-up`).
 
 ```bash
-sudo RM_INSTALL_BIND=0.0.0.0:9000 bash install.sh
+sudo bash install.sh
 ```
 
 Installer memasang MariaDB + FreeRADIUS + Go, membangun biner, menulis unit
 systemd, lalu menguji `/v1/server/health` sendiri. Idempoten.
+
+Bind-nya `0.0.0.0:9000` secara bawaan, karena backend menjangkau VM ini dari
+luar lewat DSTNAT concentrator. Batasi aksesnya di lapis jaringan (allow-list
+dstnat di concentrator), bukan dengan mengikat ke loopback — bind ke
+`127.0.0.1` membuat installer melapor **hijau** sambil port-nya tak terjangkau
+siapa pun. Untuk memaksa loopback: `sudo RM_INSTALL_BIND=127.0.0.1:9000 bash
+install.sh`.
 
 Setelah itu isi **`/etc/radius-manager-api/env`** (dibuat installer, 0600,
 tidak pernah ditimpa saat install ulang):

@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # Defaults chosen to match docs/SRS-RadiusManagerAPI.md + deployments/systemd.
-RM_INSTALL_BIND="${RM_INSTALL_BIND:-127.0.0.1:9000}"
+RM_INSTALL_BIND="${RM_INSTALL_BIND:-0.0.0.0:9000}"
 RM_INSTALL_REPO="${RM_INSTALL_REPO:-https://github.com/netovas-billing/freeradius-manager.git}"
 RM_INSTALL_BRANCH="${RM_INSTALL_BRANCH:-master}"
 RM_INSTALL_DIR="${RM_INSTALL_DIR:-/opt/freeradius-manager}"
@@ -53,13 +53,16 @@ USAGE
   curl -fsSL <raw-url>/install.sh | sudo bash
 
 ENVIRONMENT (defaults shown)
-  RM_INSTALL_BIND=127.0.0.1:9000        Listen address baked into the systemd unit.
-      PERHATIAN: bawaan 127.0.0.1 hanya bisa dihubungi dari mesin ini sendiri.
-      Kalau backend menjangkau VM ini lewat DSTNAT concentrator (atau dari
-      jaringan lain), port 9000-nya TIDAK akan terjangkau — dan installer tetap
-      melapor hijau, karena self-test-nya menembak 127.0.0.1. Pakai:
-          sudo RM_INSTALL_BIND=0.0.0.0:9000 bash install.sh
-      lalu batasi aksesnya di firewall / hanya lewat tunnel.
+  RM_INSTALL_BIND=0.0.0.0:9000          Listen address baked into the systemd unit.
+      Bawaannya wildcard KARENA itu satu-satunya nilai yang bekerja untuk cara
+      sistem ini dipakai: backend menjangkau VM ini dari luar, lewat DSTNAT
+      concentrator. Bawaan 127.0.0.1 yang dipakai sebelumnya membuat port 9000
+      hanya terjangkau dari mesin itu sendiri, SEMENTARA installer tetap melapor
+      hijau karena self-test-nya menembak loopback — kegagalan bisu yang sudah
+      memakan waktu di lapangan.
+      Batasi aksesnya di lapis jaringan, bukan di sini: allow-list dstnat di
+      concentrator sudah menjadi pintunya. Untuk memaksa loopback saja:
+          sudo RM_INSTALL_BIND=127.0.0.1:9000 bash install.sh
   RM_INSTALL_REPO=...freeradius-manager.git  Source repo (curl|bash mode only).
   RM_INSTALL_BRANCH=master              Branch to clone.
   RM_INSTALL_DIR=/opt/freeradius-manager  Clone target.
@@ -91,6 +94,31 @@ export NEEDRESTART_MODE=a   # silence needrestart kernel/service prompts on Ubun
 # -- Phase 2: apt deps --------------------------------------------------------
 phase "apt dependencies"
 # ssl-cert pulls /etc/ssl/certs/ssl-cert-snakeoil.pem (freeradius eap needs it).
+#
+# KENAPA MASIH ADA PYTHON padahal runtime API sudah Go.
+# Tiga alasan berbeda, dan hanya dua yang nyata:
+#
+#   python3      — DIBUTUHKAN, tapi bukan oleh API. Instance yang SUDAH berjalan
+#                  dengan Python punya ExecStart=<dir>/venv/bin/uvicorn, dan venv
+#                  yang dibuat `python3 -m venv` menaut-simbolkan interpreternya
+#                  ke python3 SISTEM. Tanpa itu unit-unit lama mati. (Di Debian
+#                  python3 praktis selalu ada sebagai dependensi basis, jadi ini
+#                  ikat-pinggang-dan-bretel, bukan penopang utama.)
+#
+#   python3-venv — jalan keluar. Ia hanya dipakai untuk MEMBUAT instance Python
+#   python3-pip    baru, dan bawaan runtime sudah "go" di kedua jalur
+#                  (internal/config.Load dan radius-manager.sh), jadi jalur itu
+#                  tak pernah tersentuh dalam operasi normal: SetupInstance
+#                  keluar lebih awal di `if b.PakaiGo()` SEBELUM CreateVenv.
+#                  Tetap dipasang karena RM_API_RUNTIME=python masih didukung
+#                  sebagai jalan keluar kalau runtime Go bermasalah di satu
+#                  mesin — dan RM-API TIDAK apt-install apa pun sendiri, jadi
+#                  tanpa paket ini jalan keluar itu gagal tepat saat dibutuhkan.
+#                  (radius-manager.sh memasangnya sendiri secara lazy, jadi
+#                  jalur bash tak bergantung pada baris ini.)
+#
+# Kalau jalan keluar Python dinyatakan mati, dua paket itu boleh dicabut dan
+# python3 boleh tetap tinggal.
 APT_PKGS=(
     mariadb-server freeradius freeradius-mysql freeradius-utils
     python3 python3-venv python3-pip
@@ -431,7 +459,27 @@ ok "radius-manager-api restarted"
 
 # -- Phase 13: self-test ------------------------------------------------------
 phase "Self-test (HTTP health + service status)"
-health_url="http://${RM_INSTALL_BIND}/v1/server/health"
+# Alamat untuk MENGUJI dan MENCETAK, diturunkan dari alamat bind.
+#
+# Kalau bind-nya wildcard (0.0.0.0 / ::), "http://0.0.0.0:9000" bukan alamat
+# yang berguna: menghubunginya bergantung pada perilaku kernel, dan
+# mencetaknya ke layar memberi operator URL yang tak bisa ditempel ke mana pun.
+# Yang diuji adalah loopback; yang DICETAK adalah IP mesin ini, supaya operator
+# tahu alamat yang sebenarnya harus dijangkau backend.
+rm_bind_host="${RM_INSTALL_BIND%:*}"
+rm_bind_port="${RM_INSTALL_BIND##*:}"
+case "$rm_bind_host" in
+    0.0.0.0|::|"[::]"|"") rm_probe="127.0.0.1:${rm_bind_port}" ;;
+    *)                    rm_probe="${RM_INSTALL_BIND}" ;;
+esac
+rm_tampil="$rm_probe"
+if [ "$rm_probe" != "$RM_INSTALL_BIND" ]; then
+    rm_ip_luar="$(ip -4 -o addr show scope global 2>/dev/null \
+        | awk '{print $4}' | cut -d/ -f1 | head -1)"
+    [ -n "$rm_ip_luar" ] && rm_tampil="${rm_ip_luar}:${rm_bind_port}"
+fi
+
+health_url="http://${rm_probe}/v1/server/health"
 code=000
 for i in $(seq 1 30); do
     code=$(curl -s -o /tmp/rm-install-health.json -w '%{http_code}' "$health_url" 2>/dev/null || echo "000")
@@ -493,8 +541,8 @@ cat <<EOF
 
   ${C_BOLD}radius-manager-api install complete${C_RESET}
 
-  API URL          http://${RM_INSTALL_BIND}/
-  Health           http://${RM_INSTALL_BIND}/v1/server/health
+  API URL          http://${rm_tampil}/
+  Health           http://${rm_tampil}/v1/server/health
   Token file       ${TOKEN_FILE}      (0600 root:root)
   Setelan per-host ${ENV_FILE}        (0600 root:root)
   Binary           ${BIN_DST}
@@ -514,9 +562,9 @@ cat <<EOF
     systemctl status radius-manager-api --no-pager
     journalctl -u radius-manager-api -f
     curl -H "Authorization: Bearer \$(sudo cat ${TOKEN_FILE})" \\
-         http://${RM_INSTALL_BIND}/v1/server/info | jq
+         http://${rm_tampil}/v1/server/info | jq
 
   Next step: create your first instance with
-    POST http://${RM_INSTALL_BIND}/v1/instances/  body: {"name":"yourname"}
+    POST http://${rm_tampil}/v1/instances/  body: {"name":"yourname"}
 
 EOF
