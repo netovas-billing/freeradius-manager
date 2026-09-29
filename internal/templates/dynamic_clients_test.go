@@ -28,7 +28,7 @@ func render(t *testing.T, net string) string {
 // operator tidak menyebut jaringannya, konfigurasinya persis seperti sebelumnya.
 func TestDynamicClients_KosongTakMengubahApaPun(t *testing.T) {
 	s := render(t, "")
-	for _, terlarang := range []string{"dynamic_clients", "dynclients_", "client dynamic_"} {
+	for _, terlarang := range []string{"dynamic_clients", "dynclients_", "clients dynclist_", "clients = dynclist_"} {
 		if strings.Contains(s, terlarang) {
 			t.Errorf("DynamicClientNet kosong tapi %q ikut dipancarkan:\n%s", terlarang, s)
 		}
@@ -37,25 +37,90 @@ func TestDynamicClients_KosongTakMengubahApaPun(t *testing.T) {
 
 // Diisi = blok client ada DI DALAM listen, bukan global.
 //
-// Satu FreeRADIUS melayani BANYAK instance di mesin ini, dan yang membedakannya
-// adalah PORT — bukan alamat NAS. Blok client global membuat paket dari satu NAS
-// bisa dicocokkan instance mana pun yang jaringannya bertumpang tindih, dan yang
-// menang adalah yang kebetulan lebih dulu: pelanggan mitra A diautentikasi
-// terhadap data mitra B.
-func TestDynamicClients_ClientBeradaDiDalamListen(t *testing.T) {
+// Bentuk yang dipakai HARUS `clients = <nama>` pada listener + blok
+// `clients <nama> { client ... }` di lingkup global — bukan `client { }` yang
+// disarangkan di dalam `listen { }`.
+//
+// Alasannya ada di source FreeRADIUS, bukan selera:
+//
+//   - client.c:248-251 — listener TANPA item `clients` membuat client dari SQL
+//     masuk ke daftar GLOBAL, sementara `client { }` di dalam `server { }`
+//     memberi listener itu daftar LAIN. Dua daftar berbeda, dan paketnya tetap
+//     dibuang. Itu cacat bentuk lama.
+//
+//   - client.c:278 — routing hanya membaca seksi `listen` PERTAMA (komentarnya
+//     sendiri: "@todo - add the client to _all_ listeners?"). Jadi auth, acct,
+//     dan coa WAJIB menunjuk nama daftar yang SAMA; kalau berbeda, auth hidup
+//     tapi accounting dibuang senyap — jalur uang mati tanpa pesan.
+//
+//   - Daftar per-socket juga memisahkan client SQL antar instance. Tanpa itu
+//     semua instance menumpuk di satu daftar global, dan karena concentrator
+//     adalah sumber daya bersama dua mitra bisa punya nasname IDENTIK: hanya
+//     satu secret yang bertahan, mitra yang kalah mati tanpa pesan.
+func TestDynamicClients_DaftarPerSocketBukanNestedDiListen(t *testing.T) {
 	s := render(t, "172.31.199.0/24")
-	iAuth := strings.Index(s, "port   = 14368")
-	iClient := strings.Index(s, "client dynamic_radius_test1 {")
-	iAuthorize := strings.Index(s, "    authorize {")
-	if iAuth < 0 || iClient < 0 || iAuthorize < 0 {
-		t.Fatalf("potongan yang dicari tidak ada:\n%s", s)
+
+	// Bentuk lama yang tak berdasar tidak boleh kembali.
+	if strings.Contains(s, "client dynamic_radius_test1 {") {
+		t.Error("kembali ke `client { }` yang disarangkan di dalam `listen { }` — bentuk itu tak didukung")
 	}
-	if !(iAuth < iClient && iClient < iAuthorize) {
-		t.Fatalf("client dinamis tidak berada di dalam blok listen auth "+
-			"(auth=%d client=%d authorize=%d)", iAuth, iClient, iAuthorize)
+
+	iClients := strings.Index(s, "clients dynclist_radius_test1 {")
+	iServer := strings.Index(s, "server radius_test1 {")
+	if iClients < 0 || iServer < 0 {
+		t.Fatalf("blok clients atau server tidak ada:\n%s", s)
 	}
+	// Lingkup GLOBAL: blok clients harus di luar `server { }`.
+	if iClients > iServer {
+		t.Errorf("blok clients ada di dalam server (clients=%d server=%d) — harus lingkup global", iClients, iServer)
+	}
+
+	// KETIGA listener menunjuk daftar yang sama. Ini penjaga client.c:278.
+	if n := strings.Count(s, "clients = dynclist_radius_test1"); n != 3 {
+		t.Errorf("listener yang menunjuk daftar per-socket = %d, mau 3 (auth, acct, coa):\n%s", n, s)
+	}
+	for _, tipe := range []string{"auth", "acct", "coa"} {
+		i := strings.Index(s, "type   = "+tipe)
+		if i < 0 {
+			t.Fatalf("listener %s tidak ada", tipe)
+		}
+		// Cari `clients =` berikutnya SEBELUM listener/blok berikutnya dibuka.
+		sisa := s[i:]
+		batas := strings.Index(sisa[1:], "    listen {")
+		if batas < 0 {
+			batas = strings.Index(sisa, "    authorize {")
+		}
+		if batas > 0 {
+			sisa = sisa[:batas]
+		}
+		if !strings.Contains(sisa, "clients = dynclist_radius_test1") {
+			t.Errorf("listener %s tidak menunjuk dynclist — auth/acct/coa harus daftar yang SAMA", tipe)
+		}
+	}
+
 	if !strings.Contains(s, "ipaddr          = 172.31.199.0/24") {
 		t.Errorf("jaringan tidak dipancarkan apa adanya:\n%s", s)
+	}
+}
+
+// `lifetime = 0` berarti client dinamis di-cache sampai restart, sehingga GANTI
+// SECRET dan HAPUS NAS tetap butuh restart — dua kasus yang justru ingin kita
+// hilangkan. Config lama (freeradius-api 340102c) memakai 0; di sini tidak.
+func TestDynamicClients_LifetimeTidakAbadi(t *testing.T) {
+	s := render(t, "0.0.0.0/0")
+	i := strings.Index(s, "clients dynclist_radius_test1 {")
+	if i < 0 {
+		t.Fatalf("blok clients tidak ada:\n%s", s)
+	}
+	blok := s[i:]
+	if j := strings.Index(blok, "\n}"); j > 0 {
+		blok = blok[:j]
+	}
+	if strings.Contains(blok, "lifetime        = 0") {
+		t.Error("lifetime = 0 — ganti secret dan hapus NAS akan tetap butuh restart")
+	}
+	if !strings.Contains(blok, "lifetime        = 600") {
+		t.Errorf("lifetime bukan 600:\n%s", blok)
 	}
 }
 

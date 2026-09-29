@@ -1,3 +1,43 @@
+{{- if .DynamicClientNet }}
+# ============================================================================
+# DAFTAR CLIENT PER-SOCKET untuk instance ini.
+#
+# Kenapa ada blok `clients` tersendiri dan bukan `client { }` di dalam
+# `listen { }`: bentuk `clients = <nama>` pada listener adalah bentuk yang
+# DIDOKUMENTASIKAN FreeRADIUS (clients.conf: "edit a 'listen' section to add:
+# clients = per_socket_clients"), sedangkan `client { }` yang disarangkan
+# langsung di dalam `listen { }` tidak ada dasarnya.
+#
+# Dua akibat yang dua-duanya kita butuhkan:
+#
+#   1. `ipaddr` boleh 0.0.0.0/0 tanpa bertabrakan antar instance. Satu mesin
+#      melayani BANYAK instance dalam SATU daemon; kalau blok client se-luas
+#      itu diletakkan global, instance kedua mendefinisikan ulang jaringan
+#      yang sama dan yang menang adalah yang kebetulan dimuat lebih dulu.
+#      Di dalam `clients <nama>` miliknya sendiri, tiap instance aman.
+#
+#   2. Client dari SQL ikut pindah ke daftar ini. Dokumentasi FreeRADIUS:
+#      "If there is a listener, and the first one does have a 'clients=...'
+#      configuration item, SQL clients are added to that list." Tanpa
+#      `clients =`, client SQL SEMUA instance menumpuk di satu daftar GLOBAL —
+#      dan karena concentrator adalah sumber daya bersama, dua mitra bisa
+#      punya nasname IDENTIK. Di daftar global itu hanya satu secret yang
+#      bertahan, jadi NAS mitra yang kalah berhenti bekerja tanpa pesan apa
+#      pun. Blok ini mencegahnya.
+#
+# `lifetime` disengaja TIDAK 0. Client dinamis yang kedaluwarsa dicari ulang
+# ke tabel `nas`, sehingga GANTI SECRET dan HAPUS NAS ikut berlaku sendiri
+# dalam ≤10 menit. Dengan lifetime = 0 keduanya butuh restart FreeRADIUS.
+# ============================================================================
+clients dynclist_{{ .InstanceName }} {
+    client dyn_{{ .InstanceName }} {
+        ipaddr          = {{ .DynamicClientNet }}
+        dynamic_clients = dynclients_{{ .InstanceName }}
+        lifetime        = 600
+    }
+}
+
+{{ end }}
 server {{ .InstanceName }} {
 
     # ============================================
@@ -20,19 +60,10 @@ server {{ .InstanceName }} {
         }
 
 {{- if .DynamicClientNet }}
-        # NAS DINAMIS — dibaca dari tabel `nas` saat paket pertama tiba,
-        # tanpa restart FreeRADIUS.
-        #
-        # Blok ini SENGAJA di dalam listen, bukan global: di mesin ini satu
-        # FreeRADIUS melayani BANYAK instance, dan yang membedakannya adalah
-        # PORT — bukan alamat NAS. Blok client global akan membuat paket dari
-        # satu NAS bisa dicocokkan oleh instance mana pun yang jaringannya
-        # bertumpang tindih, dan yang menang adalah yang kebetulan lebih dulu.
-        client dynamic_{{ .InstanceName }} {
-            ipaddr          = {{ .DynamicClientNet }}
-            dynamic_clients = dynclients_{{ .InstanceName }}
-            lifetime        = 600
-        }
+        # Daftar client KHUSUS socket ini — lihat `clients dynclist_...` di
+        # kepala berkas. Dipakai ketiga listener supaya SQL client dan client
+        # dinamis mendarat di daftar yang SAMA.
+        clients = dynclist_{{ .InstanceName }}
 {{- end }}
     }
 
@@ -47,19 +78,10 @@ server {{ .InstanceName }} {
         }
 
 {{- if .DynamicClientNet }}
-        # NAS DINAMIS — dibaca dari tabel `nas` saat paket pertama tiba,
-        # tanpa restart FreeRADIUS.
-        #
-        # Blok ini SENGAJA di dalam listen, bukan global: di mesin ini satu
-        # FreeRADIUS melayani BANYAK instance, dan yang membedakannya adalah
-        # PORT — bukan alamat NAS. Blok client global akan membuat paket dari
-        # satu NAS bisa dicocokkan oleh instance mana pun yang jaringannya
-        # bertumpang tindih, dan yang menang adalah yang kebetulan lebih dulu.
-        client dynamic_{{ .InstanceName }} {
-            ipaddr          = {{ .DynamicClientNet }}
-            dynamic_clients = dynclients_{{ .InstanceName }}
-            lifetime        = 600
-        }
+        # Daftar client KHUSUS socket ini — lihat `clients dynclist_...` di
+        # kepala berkas. Dipakai ketiga listener supaya SQL client dan client
+        # dinamis mendarat di daftar yang SAMA.
+        clients = dynclist_{{ .InstanceName }}
 {{- end }}
     }
 
@@ -72,6 +94,9 @@ server {{ .InstanceName }} {
             lifetime        = 0
             idle_timeout    = 30
         }
+{{- if .DynamicClientNet }}
+        clients = dynclist_{{ .InstanceName }}
+{{- end }}
     }
 
     authorize {

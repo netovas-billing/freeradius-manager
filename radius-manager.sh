@@ -886,10 +886,46 @@ create_virtual_server() {
     local SERVER_NAME="${ADMIN_USERNAME}"          # <-- TANPA prefix pppoe_
     local SERVER_FILE="$SITES_AVAILABLE/$SERVER_NAME"
 
+    # NAS dinamis. Gerbangnya env yang SAMA dengan jalur Go
+    # (internal/config.Load → templates.Vars.DynamicClientNet); kosong berarti
+    # fitur mati dan berkas ini persis seperti sebelumnya. Paritas ini bukan
+    # kemewahan: jalur bash pernah terlewat saat migrasi runtime Python→Go,
+    # dan akibatnya `create` diam-diam tetap memakai jalur lama.
+    local DYN_NET="${RM_API_DYNAMIC_CLIENT_NET:-}"
+    local DYN_MARKER="%%TANPA-DAFTAR-DINAMIS%%"
+    # Saat fitur MATI nilainya penanda, bukan string kosong: `${DYN_LISTEN}`
+    # yang kosong meninggalkan baris hampa di dalam setiap blok listen, dan
+    # berkasnya jadi tidak identik dengan sebelum fitur ini ada. Penandanya
+    # dibuang sesudah heredoc, sehingga "mati" berarti benar-benar tak berubah.
+    local DYN_LISTEN="${DYN_MARKER}"
+    if [ -n "$DYN_NET" ]; then
+        DYN_LISTEN="        clients = dynclist_${SERVER_NAME}"
+    fi
+
     info "Creating virtual server: $SERVER_NAME"
     info "  Auth : $AUTH_PORT | Acct : $ACCT_PORT | CoA : $COA_PORT"
 
-    cat > "$SERVER_FILE" << EOF
+    : > "$SERVER_FILE"
+
+    # Daftar client per-socket. WAJIB di lingkup global, di luar `server { }`.
+    # Tanpa `clients =` di listener, client dari SQL semua instance menumpuk di
+    # satu daftar GLOBAL; dua mitra dengan nasname identik (mungkin, karena
+    # concentrator dipakai bersama) lalu membuat FreeRADIUS MENOLAK START
+    # dengan "Failed to add duplicate client" — seluruh mesin mati.
+    if [ -n "$DYN_NET" ]; then
+        cat >> "$SERVER_FILE" << EOF
+clients dynclist_${SERVER_NAME} {
+    client dyn_${SERVER_NAME} {
+        ipaddr          = ${DYN_NET}
+        dynamic_clients = dynclients_${SERVER_NAME}
+        lifetime        = 600
+    }
+}
+
+EOF
+    fi
+
+    cat >> "$SERVER_FILE" << EOF
 server ${SERVER_NAME} {
 
     # ============================================
@@ -910,6 +946,7 @@ server ${SERVER_NAME} {
             lifetime        = 0
             idle_timeout    = 30
         }
+${DYN_LISTEN}
     }
 
     listen {
@@ -921,6 +958,7 @@ server ${SERVER_NAME} {
             lifetime        = 0
             idle_timeout    = 30
         }
+${DYN_LISTEN}
     }
 
     listen {
@@ -932,6 +970,7 @@ server ${SERVER_NAME} {
             lifetime        = 0
             idle_timeout    = 30
         }
+${DYN_LISTEN}
     }
 
     authorize {
@@ -1016,6 +1055,40 @@ server ${SERVER_NAME} {
     }
 }
 EOF
+
+    # Virtual server pencari NAS dinamis. Dipicu FreeRADIUS saat paket tiba
+    # dari IP yang belum ada di daftar client; ia mencari barisnya di tabel
+    # `nas`, lalu NAS itu di-cache beserta secret-nya.
+    #
+    # DUA hal yang TIDAK boleh disalin dari contoh FreeRADIUS mana pun:
+    #   1. Modulnya harus sql_<instance>, bukan `sql` polos — tiap instance di
+    #      mesin ini menunjuk DATABASE-nya sendiri.
+    #   2. Virtual-Server harus <instance>, bukan "default" — kalau salah,
+    #      pelanggan mitra A diautentikasi terhadap data mitra B.
+    if [ -n "$DYN_NET" ]; then
+        cat >> "$SERVER_FILE" << EOF
+
+server dynclients_${SERVER_NAME} {
+    authorize {
+        if ("%{sql_${SERVER_NAME}: SELECT nasname FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}") {
+            update control {
+                &FreeRADIUS-Client-IP-Address     = "%{Packet-Src-IP-Address}"
+                &FreeRADIUS-Client-Shortname      = "%{sql_${SERVER_NAME}: SELECT COALESCE(shortname, nasname) FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}"
+                &FreeRADIUS-Client-Secret         = "%{sql_${SERVER_NAME}: SELECT secret FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}"
+                &FreeRADIUS-Client-NAS-Type       = "%{sql_${SERVER_NAME}: SELECT COALESCE(type, 'other') FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}"
+                &FreeRADIUS-Client-Virtual-Server = "${SERVER_NAME}"
+            }
+            ok
+        }
+        else {
+            reject
+        }
+    }
+}
+EOF
+    fi
+
+    sed -i "/^${DYN_MARKER}\$/d" "$SERVER_FILE"
 
     ln -sf "$SERVER_FILE" "$SITES_ENABLED/$SERVER_NAME"
     chown -h "${FR_USER}:${FR_GROUP}" "$SITES_ENABLED/$SERVER_NAME"
