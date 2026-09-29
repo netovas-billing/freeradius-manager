@@ -252,3 +252,97 @@ func TestListen_BisaDitimpa(t *testing.T) {
 		t.Fatalf("RM_API_LISTEN tidak dihormati: %q", c.Listen)
 	}
 }
+
+// Bawaan DynamicClientNet adalah "0.0.0.0/0" — KEPUTUSAN PEMILIK SISTEM
+// 29 Sep 2026, diambil setelah imbal-balik keamanannya dijelaskan. Tes ini ada
+// supaya tak ada yang mengembalikannya diam-diam sebagai "pengerasan", dan
+// supaya alasannya ikut terbaca:
+//
+// NAS produksi memakai IP PUBLIK sembarang — 24 dari 25 radius_servers hidup
+// ber-reach_mode "public", di mana nasname adalah IP publik router mitra atau
+// IP publik concentrator. TIDAK ADA CIDR yang bisa dideklarasikan di muka.
+// Dengan CIDR sempit, NAS di luarnya jadi client tak dikenal dan paketnya
+// DIBUANG tanpa balasan dan tanpa log sampai FreeRADIUS di-restart — dan satu
+// restart di host produksi terpadat menurunkan 9 instance milik 10 tenant.
+//
+// Yang menahan biayanya: FreeRADIUS 3 membatasi satu client baru per detik per
+// blok network, tak pernah menjawab IP tak dikenal (jadi nol amplifikasi
+// refleksi), dan tak pernah mengirim secret ke pengirim. Pengerasan lanjutan
+// kalau diminta: allow-list nftables yang dibangkitkan dari tabel `nas`.
+//
+// Kalau seluruh NAS sebuah mesin memang lewat pool VPN, sempitkan lewat env —
+// bukan dengan mengubah bawaan ini.
+func TestDynamicClientNet_BawaanLuasDisengaja(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_DYNAMIC_CLIENT_NET", "")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.DynamicClientNet != "0.0.0.0/0" {
+		t.Errorf("bawaan DynamicClientNet = %q, mau %q — lihat komentar di atas "+
+			"sebelum mengubahnya", c.DynamicClientNet, "0.0.0.0/0")
+	}
+}
+
+// Env tetap menang, supaya operator bisa menyempitkan per mesin.
+func TestDynamicClientNet_EnvMenimpaBawaan(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_DYNAMIC_CLIENT_NET", "172.31.199.0/24")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.DynamicClientNet != "172.31.199.0/24" {
+		t.Errorf("DynamicClientNet = %q, env diabaikan", c.DynamicClientNet)
+	}
+}
+
+// Sakelar MATI harus ada. Tanpa penanda khusus, fitur ini tak bisa dimatikan
+// lewat env sama sekali (getenv memperlakukan kosong sebagai "tak diisi"), dan
+// satu-satunya jalan keluar bagi operator adalah mengubah kode lalu deploy
+// ulang — terlalu mahal untuk sesuatu yang menyentuh config FreeRADIUS setiap
+// instance di mesin.
+func TestDynamicClientNet_SakelarMati(t *testing.T) {
+	for _, nilai := range []string{"off", "OFF", "none", "-", "mati", " off "} {
+		t.Run(nilai, func(t *testing.T) {
+			t.Setenv("RM_API_TOKEN", "devtoken")
+			t.Setenv("RM_API_DYNAMIC_CLIENT_NET", nilai)
+
+			c, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if c.DynamicClientNet != "" {
+				t.Errorf("%q tidak mematikan fitur (dapat %q)", nilai, c.DynamicClientNet)
+			}
+		})
+	}
+}
+
+// Spasi harus dibuang. Nilai " " yang lolos ke template menghasilkan
+// `ipaddr          =` tanpa nilai; FreeRADIUS gagal parse dan daemon TIDAK
+// NAIK — yang memutus SELURUH instance di mesin itu, bukan satu mitra.
+func TestDynamicClientNet_SpasiTakBocorKeTemplate(t *testing.T) {
+	t.Setenv("RM_API_TOKEN", "devtoken")
+	t.Setenv("RM_API_DYNAMIC_CLIENT_NET", "   ")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.DynamicClientNet != "0.0.0.0/0" {
+		t.Errorf("spasi tidak dinormalkan: %q", c.DynamicClientNet)
+	}
+
+	t.Setenv("RM_API_DYNAMIC_CLIENT_NET", "  172.31.199.0/24  ")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.DynamicClientNet != "172.31.199.0/24" {
+		t.Errorf("spasi di sekitar CIDR tidak dibuang: %q", c.DynamicClientNet)
+	}
+}

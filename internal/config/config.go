@@ -89,8 +89,17 @@ type Config struct {
 	BootstrapGoRef         string // RM_API_GO_REF — tag/branch/commit yang dipaku
 	BootstrapGoTemplateDir string // RM_API_GO_TEMPLATE_DIR
 
-	// DynamicClientNet — RM_API_DYNAMIC_CLIENT_NET, mis. "172.31.199.0/24".
-	// Kosong = fitur mati (perilaku lama). Lihat templates.Vars.DynamicClientNet.
+	// DynamicClientNet — RM_API_DYNAMIC_CLIENT_NET. BAWAAN "0.0.0.0/0".
+	//
+	// Bawaan seluas itu keputusan pemilik sistem (29 Sep 2026), diambil setelah
+	// imbal-baliknya dijelaskan, dan alasannya struktural: NAS produksi memakai
+	// IP PUBLIK sembarang, jadi tak ada CIDR yang bisa dideklarasikan di muka.
+	// Lihat TestDynamicClientNet_BawaanLuasDisengaja untuk uraian lengkapnya.
+	//
+	// Menyempitkan: isi dengan CIDR, mis. "172.31.199.0/24".
+	// MEMATIKAN: isi "off" (juga "none", "-", "mati"). Nilai KOSONG tidak
+	// mematikan apa pun — getenv memperlakukan kosong sebagai "tak diisi"
+	// sehingga bawaan yang berlaku.
 	DynamicClientNet string
 
 	// SystemdBackend selects which Systemctl implementation runs the
@@ -152,7 +161,7 @@ func Load() (*Config, error) {
 		BootstrapGoRepo:        getenv("RM_API_GO_REPO", "https://github.com/netovas-billing/freeradius-api"),
 		BootstrapGoRef:         os.Getenv("RM_API_GO_REF"),
 		BootstrapGoTemplateDir: getenv("RM_API_GO_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-go-template"),
-		DynamicClientNet:       strings.TrimSpace(os.Getenv("RM_API_DYNAMIC_CLIENT_NET")),
+		DynamicClientNet:       jaringanClientDinamis(),
 		SystemdBackend:         strings.ToLower(getenv("RM_API_SYSTEMD_BACKEND", "systemd")),
 		InstanceDBHost:         getenv("RM_API_INSTANCE_DB_HOST", "localhost"),
 		MaintenanceBackend:     strings.ToLower(getenv("RM_API_MAINTENANCE_BACKEND", "systemd")),
@@ -204,6 +213,31 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// jaringanClientDinamis membaca RM_API_DYNAMIC_CLIENT_NET.
+//
+// Dua hal yang tidak bisa diserahkan ke getenv biasa:
+//
+//  1. Sakelar MATI. getenv memperlakukan string kosong sebagai "tak diisi" dan
+//     mengembalikan bawaan, jadi tanpa penanda khusus fitur ini TIDAK BISA
+//     dimatikan lewat env sama sekali — operator yang menemui masalah di
+//     produksi hanya bisa mengubah kode lalu deploy ulang. Itu jalan keluar
+//     yang terlalu mahal untuk sesuatu yang menyentuh config FreeRADIUS setiap
+//     instance.
+//
+//  2. Spasi. Nilai " " lolos apa adanya ke template dan menghasilkan
+//     `ipaddr          =` tanpa nilai — FreeRADIUS gagal parse dan daemon TIDAK
+//     NAIK, memutus seluruh instance di mesin itu, bukan cuma satu.
+func jaringanClientDinamis() string {
+	v := strings.TrimSpace(os.Getenv("RM_API_DYNAMIC_CLIENT_NET"))
+	switch strings.ToLower(v) {
+	case "off", "none", "-", "mati":
+		return ""
+	case "":
+		return "0.0.0.0/0"
+	}
+	return v
 }
 
 // ParseAPIPortStart membaca isi RM_API_API_PORT_START dengan aturan yang SAMA

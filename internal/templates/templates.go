@@ -45,9 +45,25 @@ type Vars struct {
 	// (RM-API RestartInstance hanya menyentuh <nama>-api.service), jadi selama
 	// ini itu langkah MANUAL yang harus diketahui orangnya.
 	//
-	// JANGAN diisi 0.0.0.0/0. Cakupan seluas itu membuat siapa pun yang
-	// menjangkau port RADIUS bisa menyuntik accounting (jalur uang) dan menguji
-	// kredensial pelanggan, dan satu secret bocor membuka semua NAS sekaligus.
+	// BAWAANNYA "0.0.0.0/0" (config.jaringanClientDinamis). Itu keputusan
+	// pemilik sistem 29 Sep 2026, diambil setelah imbal-baliknya dijelaskan,
+	// dan alasannya struktural: NAS produksi memakai IP PUBLIK sembarang — 24
+	// dari 25 radius_servers hidup ber-reach_mode "public", di mana nasname
+	// adalah IP publik router mitra atau IP publik concentrator — sehingga
+	// TIDAK ADA CIDR yang bisa dideklarasikan di muka.
+	//
+	// Imbal-baliknya, dan ini nyata: paket dari IP yang TIDAK ada di tabel
+	// `nas` memicu pencarian SQL. FreeRADIUS 3 tak punya negative cache (baru
+	// ada di v4) dan tak punya deny-list maupun max_clients. Yang menahan
+	// biayanya: ia membatasi SATU client baru per detik per blok network, tak
+	// pernah menjawab IP tak dikenal (jadi nol amplifikasi refleksi), dan tak
+	// pernah mengirim secret ke pengirim.
+	//
+	// Menyempitkan kalau seluruh NAS sebuah mesin lewat pool VPN: isi CIDR-nya.
+	// Mematikan: isi "off". Pengerasan lanjutan kalau port RADIUS sebuah mesin
+	// memang terbuka lebar: allow-list kernel (nftables set) yang dibangkitkan
+	// dari tabel `nas` dan diperbarui atomik tanpa menyentuh daemon — di luar
+	// cakupan berkas ini.
 	DynamicClientNet string
 }
 
