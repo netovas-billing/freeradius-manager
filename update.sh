@@ -20,7 +20,62 @@ AUTOBACKUPS3_SCHEDULE="@daily"
 # artinya instance Go tak pernah bisa diperbarui sama sekali.
 API_REPO_GO="${API_REPO_GO:-https://github.com/netovas-billing/freeradius-api}"
 API_REPO_GO_REF="${API_REPO_GO_REF:-}"
-API_GO_TEMPLATE_DIR="${API_GO_TEMPLATE_DIR:-/var/lib/radius-manager/freeradius-api-go-template}"
+
+# Direktori template: TIGA nama harus sepakat, dan dulu tidak.
+#
+# Skrip ini dan radius-manager.sh memakai API_GO_TEMPLATE_DIR dengan bawaan
+# /var/lib/radius-manager/..., sementara control plane Go (internal/config)
+# memakai RM_API_GO_TEMPLATE_DIR dengan bawaan /var/lib/radius-manager-API/... —
+# nama berkas yang BEDA SATU KATA. Akibatnya di mesin yang instance-nya dibuat
+# lewat ERP (yaitu lewat RM-API), skrip ini berhenti di "Template Go tidak ada"
+# dan MELEWATI SEMUA INSTANCE. Gagalnya berisik, tapi tetap berarti pembaruan
+# tak pernah sampai — dan itu baru ketahuan saat operator justru sedang
+# memperbaiki sesuatu.
+#
+# Urutan pencariannya: yang disebut pemanggil dulu, lalu setelan per-host,
+# baru dua bawaan yang dikenal. Yang dipilih adalah yang PUNYA .git — karena
+# itulah satu-satunya yang bisa di-pull dan dibangun.
+RM_API_ENV_FILE="${RM_API_ENV_FILE:-/etc/radius-manager-api/env}"
+
+# Ambil HANYA kunci yang dibutuhkan, dan hanya nilai sederhana. Sourcing utuh
+# berkas setelan berarti menjalankan isinya sebagai skrip — terlalu banyak
+# kuasa untuk mengambil satu jalur direktori.
+baca_setelan_host() {
+    local kunci="$1" baris
+    [ -r "$RM_API_ENV_FILE" ] || return 1
+    baris=$(grep -E "^[[:space:]]*${kunci}=" "$RM_API_ENV_FILE" 2>/dev/null | tail -1) || return 1
+    [ -n "$baris" ] || return 1
+    baris="${baris#*=}"
+    baris="${baris%\"}"; baris="${baris#\"}"
+    baris="${baris%\'}"; baris="${baris#\'}"
+    printf '%s' "$baris"
+}
+
+pilih_template_dir() {
+    local kandidat=()
+    [ -n "${API_GO_TEMPLATE_DIR:-}" ] && kandidat+=("$API_GO_TEMPLATE_DIR")
+    [ -n "${RM_API_GO_TEMPLATE_DIR:-}" ] && kandidat+=("$RM_API_GO_TEMPLATE_DIR")
+    local dariEnv
+    dariEnv=$(baca_setelan_host RM_API_GO_TEMPLATE_DIR) && [ -n "$dariEnv" ] && kandidat+=("$dariEnv")
+    kandidat+=("/var/lib/radius-manager-api/freeradius-api-go-template")
+    kandidat+=("/var/lib/radius-manager/freeradius-api-go-template")
+
+    local d
+    for d in "${kandidat[@]}"; do
+        if [ -d "$d/.git" ]; then
+            printf '%s' "$d"
+            return 0
+        fi
+    done
+    # Tak ada yang punya .git: kembalikan kandidat pertama supaya pesan
+    # galatnya menyebut jalur yang MASUK AKAL bagi operator, bukan jalur
+    # bawaan yang mungkin tak pernah ia pakai.
+    printf '%s' "${kandidat[0]}"
+    return 1
+}
+
+API_GO_TEMPLATE_DIR_DIMINTA="${API_GO_TEMPLATE_DIR:-}"
+API_GO_TEMPLATE_DIR="$(pilih_template_dir)" || true
 API_GO_CACHE_DIR="${API_GO_CACHE_DIR:-/var/cache/radius-manager/go-build}"
 API_GO_BIN_NAME="freeradius-api"
 API_GO_PKG_SUBDIR="api"
@@ -51,7 +106,12 @@ refresh_go_template() {
     GO_BIN=$(go_binary) || return 1
 
     if [ ! -d "$API_GO_TEMPLATE_DIR/.git" ]; then
-        error "Template Go tidak ada di ${API_GO_TEMPLATE_DIR} — jalankan create sekali dulu"
+        error "Template Go tidak ada di ${API_GO_TEMPLATE_DIR}"
+        error "  Dicari di: \$API_GO_TEMPLATE_DIR, \$RM_API_GO_TEMPLATE_DIR, ${RM_API_ENV_FILE},"
+        error "  /var/lib/radius-manager-api/freeradius-api-go-template,"
+        error "  /var/lib/radius-manager/freeradius-api-go-template"
+        error "  Jalankan create sekali dulu, atau sebut jalurnya:"
+        error "    API_GO_TEMPLATE_DIR=<jalur> bash update.sh"
         return 1
     fi
 
