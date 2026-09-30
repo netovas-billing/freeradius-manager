@@ -1945,7 +1945,19 @@ INFOEOF
 
     # ------------------------------------------
     restart)
-        restart_freeradius
+        # Status keluar DITERUSKAN, dan hanya di sini.
+        #
+        # Skrip ini berakhir dengan `exit 0` tanpa syarat, jadi dulu
+        # `radius-manager.sh restart` SELALU melaporkan sukses — termasuk saat
+        # restart gagal dan FreeRADIUS mati. Pemanggil dari luar (mis. skrip
+        # operator atau otomasi) tak punya cara membedakannya selain membaca
+        # keluaran teks.
+        #
+        # Cakupannya sengaja subcommand INI saja. `create`, `delete`, `start`,
+        # dan `stop` juga memanggil restart_freeradius, tapi mereka mengerjakan
+        # hal lain sesudahnya dan statusnya sudah punya arti sendiri; mengubah
+        # itu sekalian berarti mengubah kontrak yang mungkin sudah diandalkan.
+        restart_freeradius || exit 1
         ;;
 
     # ------------------------------------------
