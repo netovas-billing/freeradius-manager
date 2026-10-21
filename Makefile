@@ -25,6 +25,9 @@ test: ## Run unit tests (no infra dependencies).
 test-port-block: ## Uji blok port API di radius-manager.sh (tanpa root/Docker).
 	./scripts/test-port-block.sh
 
+test-ruang-vpn: ## vpn-client-setup.sh menolak mesin yang memakai 172.16.0.0/12 di luar tunnel (Docker/LAN).
+	bash scripts/test-ruang-vpn.sh
+
 test-vpn-config: ## Uji berkas konfigurasi terbitan vpn-client-setup.sh (tanpa root).
 	./scripts/test-vpn-client-config.sh
 
@@ -34,7 +37,7 @@ test-vpn-unit-tunnel: ## Unit tunnel systemd membuktikan tunnelnya naik (bukan c
 test-install-unit: ## Uji unit systemd terbitan install.sh (tanpa root).
 	./scripts/test-install-unit.sh
 
-test-scripts: test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel ## Semua uji sisi skrip.
+test-scripts: test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel test-ruang-vpn ## Semua uji sisi skrip.
 
 test-race: ## Run unit tests with the race detector.
 	$(GO) test -race ./...
@@ -94,6 +97,6 @@ clean: ## Remove build artifacts.
 	rm -rf bin
 	$(GO) clean -testcache
 
-.PHONY: help build test test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel test-scripts test-race test-integration test-integration-compose vet \
+.PHONY: help build test test-port-block test-ruang-vpn test-vpn-config test-install-unit test-vpn-unit-tunnel test-scripts test-race test-integration test-integration-compose vet \
         docker-up docker-down docker-clean docker-logs docker-shell docker-token docker-supervisor \
         e2e tidy fmt clean

@@ -166,6 +166,49 @@ tulis_berkas() {
   fi
 }
 
+# >>> periksa-ruang-vpn (diuji scripts/test-ruang-vpn.sh — jangan ubah penanda)
+#
+# 172.16.0.0/12 KHUSUS ruang VPN concentrator: pool NAS /17 di 172.17–172.31
+# bergateway .1, alamat VM/appliance RADIUS di 172.16/16. Kalau mesin ini sudah
+# punya alamat di rentang itu di luar tunnel — docker0 bawaan Docker
+# (172.17/16), jaringan compose (172.18+), atau LAN yang kebetulan 172.16–31 —
+# gateway pool bisa terbaca sebagai alamat LOKAL (`ip route get 172.17.0.1` →
+# `local … dev lo`): paket dari concentrator dibuang sebagai martian dan
+# balasan auth RADIUS ke NAS nyasar keluar tunnel. Dari router semuanya tampak
+# benar. Kejadian nyata di appliance staging JKT-1, 21 Okt 2026.
+dalam_ruang_vpn() {
+  local a="${1%%/*}" o1 o2
+  IFS=. read -r o1 o2 _ _ <<<"$a"
+  [ "${o1:-}" = "172" ] && [ "${o2:-0}" -ge 16 ] 2>/dev/null && [ "${o2:-0}" -le 31 ]
+}
+alamat_lokal() { ip -4 -o addr show scope global 2>/dev/null | awk '{print $2, $4}'; }
+# alamat_bentrok_vpn — "<iface> <cidr>" untuk alamat non-tunnel di 172.16/12.
+alamat_bentrok_vpn() {
+  local iface cidr
+  while read -r iface cidr; do
+    [ -n "${iface:-}" ] || continue
+    case "$iface" in lo|ppp*) continue ;; esac
+    if dalam_ruang_vpn "$cidr"; then echo "$iface $cidr"; fi
+  done < <(alamat_lokal)
+}
+pesan_bentrok_vpn() {
+  local daftar="$1"
+  echo "Mesin ini memakai alamat di 172.16.0.0–172.31.255.255 di LUAR tunnel:"
+  echo "$daftar" | sed 's/^/    /'
+  echo "  Rentang itu khusus jalur VPN concentrator (pool NAS + alamat RADIUS)."
+  if echo "$daftar" | grep -qE '^(docker|br-|veth)'; then
+    echo "  Itu jaringan Docker. Pindahkan Docker ke 198.18.0.0/15:"
+    echo "    /etc/docker/daemon.json → { \"bip\": \"198.18.0.1/24\","
+    echo "      \"default-address-pools\": [{ \"base\": \"198.19.0.0/16\", \"size\": 24 }] }"
+    echo "    lalu: systemctl restart docker (dan buat ulang jaringan compose: down → up, TANPA -v)"
+  else
+    echo "  Itu LAN mesin ini. Pindahkan mesin ke LAN lain (192.168.x.x / 10.x.x.x)"
+    echo "  atau ubah alamat LAN-nya."
+  fi
+  echo "  Lalu jalankan ulang skrip ini. Belum ada yang diubah."
+}
+# <<< periksa-ruang-vpn
+
 # ── Pemeriksaan awal ────────────────────────────────────────────────────────
 [ "$(id -u)" = 0 ] || die "jalankan sebagai root (sudo)."
 command -v systemctl >/dev/null || die "butuh systemd."
@@ -219,6 +262,14 @@ case "$NAS_POOL_CIDR" in
   */*) : ;;
   *) die "NAS_POOL_CIDR harus berbentuk CIDR, mis. 172.31.199.0/24 (dapat: $NAS_POOL_CIDR)" ;;
 esac
+
+# Ruang VPN harus bersih SEBELUM apa pun dipasang (lihat periksa-ruang-vpn).
+# Dijalankan juga di --dry-run: hanya membaca.
+BENTROK_VPN="$(alamat_bentrok_vpn)"
+if [ -n "$BENTROK_VPN" ]; then
+  pesan_bentrok_vpn "$BENTROK_VPN" >&2
+  die "alamat mesin bentrok dengan ruang VPN concentrator (172.16.0.0/12)."
+fi
 
 log "Konfigurasi yang dipakai"
 cat <<RINGKAS
