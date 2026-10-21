@@ -168,34 +168,58 @@ tulis_berkas() {
 
 # >>> periksa-ruang-vpn (diuji scripts/test-ruang-vpn.sh — jangan ubah penanda)
 #
-# 172.16.0.0/12 KHUSUS ruang VPN concentrator: pool NAS /17 di 172.17–172.31
-# bergateway .1, alamat VM/appliance RADIUS di 172.16/16. Kalau mesin ini sudah
-# punya alamat di rentang itu di luar tunnel — docker0 bawaan Docker
-# (172.17/16), jaringan compose (172.18+), atau LAN yang kebetulan 172.16–31 —
-# gateway pool bisa terbaca sebagai alamat LOKAL (`ip route get 172.17.0.1` →
-# `local … dev lo`): paket dari concentrator dibuang sebagai martian dan
-# balasan auth RADIUS ke NAS nyasar keluar tunnel. Dari router semuanya tampak
-# benar. Kejadian nyata di appliance staging JKT-1, 21 Okt 2026.
-dalam_ruang_vpn() {
-  local a="${1%%/*}" o1 o2
-  IFS=. read -r o1 o2 _ _ <<<"$a"
-  [ "${o1:-}" = "172" ] && [ "${o2:-0}" -ge 16 ] 2>/dev/null && [ "${o2:-0}" -le 31 ]
+# Alamat di LUAR tunnel yang BERIRISAN dengan jalur VPN membuat gateway pool
+# terbaca sebagai alamat LOKAL (`ip route get <gateway pool>` → `local … dev
+# lo`): paket dari concentrator dibuang sebagai martian dan balasan auth RADIUS
+# ke NAS nyasar keluar tunnel — dari router semuanya tampak benar. Kejadian
+# nyata: appliance staging JKT-1, 21 Okt 2026 (docker0 172.17.0.0/16 vs pool
+# NAS 172.17.0.0/17).
+#
+# Yang DITOLAK hanya yang benar-benar beririsan: pool NAS concentrator ini
+# (NAS_POOL_CIDR) dan ruang alamat RADIUS di tunnel (172.16.0.0/16). Alamat
+# lain di 172.16.0.0/12 cuma DIPERINGATKAN — VM prod radius-manager-jkt ber-LAN
+# 172.17.17.0/24 dengan pool 172.31.199.0/24: sah hari ini, dan menolaknya
+# berarti VM itu tak bisa menjalankan ulang skrip ini.
+RUANG_RADIUS_VPN="172.16.0.0/16"
+ip_ke_int() { local a b c d; IFS=. read -r a b c d <<<"${1%%/*}"; echo $(( (a<<24)|(b<<16)|(c<<8)|d )); }
+rentang_cidr() { # rentang_cidr <cidr> → "<awal> <akhir>"
+  local ip="${1%%/*}" len="${1##*/}"; [ "$len" = "$1" ] && len=32
+  local n m; n=$(ip_ke_int "$ip"); m=$(( len == 0 ? 0 : (0xFFFFFFFF << (32-len)) & 0xFFFFFFFF ))
+  echo $(( n & m )) $(( (n & m) | (~m & 0xFFFFFFFF) ))
 }
+cidr_beririsan() { # cidr_beririsan <a> <b>
+  local a1 a2 b1 b2; read -r a1 a2 < <(rentang_cidr "$1"); read -r b1 b2 < <(rentang_cidr "$2")
+  [ "$a1" -le "$b2" ] && [ "$b1" -le "$a2" ]
+}
+dalam_ruang_vpn() { cidr_beririsan "$1" "172.16.0.0/12"; }
 alamat_lokal() { ip -4 -o addr show scope global 2>/dev/null | awk '{print $2, $4}'; }
-# alamat_bentrok_vpn — "<iface> <cidr>" untuk alamat non-tunnel di 172.16/12.
+# alamat_bentrok_vpn <pool-nas> — "<iface> <cidr>" yang BERIRISAN dengan pool
+# NAS atau ruang alamat RADIUS (ditolak).
 alamat_bentrok_vpn() {
-  local iface cidr
+  local pool="$1" iface cidr
   while read -r iface cidr; do
     [ -n "${iface:-}" ] || continue
     case "$iface" in lo|ppp*) continue ;; esac
-    if dalam_ruang_vpn "$cidr"; then echo "$iface $cidr"; fi
+    if cidr_beririsan "$cidr" "$pool" || cidr_beririsan "$cidr" "$RUANG_RADIUS_VPN"; then
+      echo "$iface $cidr"
+    fi
+  done < <(alamat_lokal)
+}
+# alamat_rawan_vpn <pool-nas> — di 172.16.0.0/12 tapi TIDAK beririsan (peringatan).
+alamat_rawan_vpn() {
+  local pool="$1" iface cidr
+  while read -r iface cidr; do
+    [ -n "${iface:-}" ] || continue
+    case "$iface" in lo|ppp*) continue ;; esac
+    if dalam_ruang_vpn "$cidr" && ! cidr_beririsan "$cidr" "$pool" && ! cidr_beririsan "$cidr" "$RUANG_RADIUS_VPN"; then
+      echo "$iface $cidr"
+    fi
   done < <(alamat_lokal)
 }
 pesan_bentrok_vpn() {
   local daftar="$1"
-  echo "Mesin ini memakai alamat di 172.16.0.0–172.31.255.255 di LUAR tunnel:"
+  echo "Alamat mesin ini BERIRISAN dengan jalur VPN (pool NAS $NAS_POOL_CIDR / alamat RADIUS $RUANG_RADIUS_VPN):"
   echo "$daftar" | sed 's/^/    /'
-  echo "  Rentang itu khusus jalur VPN concentrator (pool NAS + alamat RADIUS)."
   if echo "$daftar" | grep -qE '^(docker|br-|veth)'; then
     echo "  Itu jaringan Docker. Pindahkan Docker ke 198.18.0.0/15:"
     echo "    /etc/docker/daemon.json → { \"bip\": \"198.18.0.1/24\","
@@ -265,10 +289,16 @@ esac
 
 # Ruang VPN harus bersih SEBELUM apa pun dipasang (lihat periksa-ruang-vpn).
 # Dijalankan juga di --dry-run: hanya membaca.
-BENTROK_VPN="$(alamat_bentrok_vpn)"
+BENTROK_VPN="$(alamat_bentrok_vpn "$NAS_POOL_CIDR")"
 if [ -n "$BENTROK_VPN" ]; then
   pesan_bentrok_vpn "$BENTROK_VPN" >&2
-  die "alamat mesin bentrok dengan ruang VPN concentrator (172.16.0.0/12)."
+  die "alamat mesin beririsan dengan jalur VPN concentrator."
+fi
+RAWAN_VPN="$(alamat_rawan_vpn "$NAS_POOL_CIDR")"
+if [ -n "$RAWAN_VPN" ]; then
+  warn "alamat ini di 172.16.0.0/12 (ruang VPN) — aman untuk pool $NAS_POOL_CIDR, tapi akan"
+  warn "bentrok kalau concentrator kelak memakai pool yang mencakupnya:"
+  echo "$RAWAN_VPN" | sed 's/^/    /' >&2
 fi
 
 log "Konfigurasi yang dipakai"

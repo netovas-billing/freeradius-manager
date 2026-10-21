@@ -97,12 +97,13 @@ sudo systemctl restart radius-manager-api
 Kalau mesin ini hidup di dalam VPN concentrator, sambungkan tunnelnya dengan
 [`scripts/vpn-client-setup.sh`](scripts/vpn-client-setup.sh).
 
-> **172.16.0.0/12 khusus ruang VPN.** Mesin ini tidak boleh punya alamat lain di
-> 172.16–172.31 di luar tunnel — Docker bawaan (`docker0` 172.17/16) atau LAN
-> yang kebetulan di rentang itu membuat gateway pool NAS terbaca alamat lokal,
-> dan auth RADIUS dari NAS mati tanpa galat. `vpn-client-setup.sh` menolaknya
-> sebelum mengubah apa pun dan menyebut obatnya (Docker → `daemon.json`
-> `198.18.0.0/15`). Uji: `make test-ruang-vpn`.
+> **Alamat di luar tunnel tidak boleh beririsan dengan jalur VPN** — pool NAS
+> (`NAS_POOL_CIDR`) atau ruang alamat RADIUS 172.16.0.0/16. Docker bawaan
+> (`docker0` 172.17/16) atau LAN yang beririsan membuat gateway pool terbaca
+> alamat lokal, dan auth RADIUS dari NAS mati tanpa galat. `vpn-client-setup.sh`
+> menolaknya sebelum mengubah apa pun dan menyebut obatnya (Docker →
+> `daemon.json` `198.18.0.0/15`). Alamat lain di 172.16.0.0/12 yang tidak
+> beririsan hanya diperingatkan. Uji: `make test-ruang-vpn`.
 
 ## Persyaratan
 
