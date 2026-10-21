@@ -39,6 +39,19 @@ blok() { # blok <path-literal-di-skrip>
   ' "$SKRIP"
 }
 
+# blokL/renderL — sama, tapi path dicocokkan LITERAL (path ber-${...} berisi
+# karakter regex yang membuat `blok` tak pernah cocok).
+blokL() {
+  awk -v p="$1" '
+    index($0, "tulis_berkas " p " <<") == 1 {ambil=1; next}
+    ambil && /^EOF$/ {exit}
+    ambil {print}
+  ' "$SKRIP"
+}
+renderL() { eval "cat <<XEOF
+$(blokL "$1")
+XEOF"; }
+
 render() { eval "cat <<XEOF
 $(blok "$1")
 XEOF"; }
@@ -172,6 +185,46 @@ if grep -q 'journalctl -u "l2tp-\${TUNNEL_NAME}.service"' "$SKRIP"; then
 else
   bad "kegagalan unit tunnel masih bisu"
 fi
+
+# ── 5. Tunnel PUTUS harus naik lagi sendiri (21 Okt 2026) ──────────────
+# VM RADIUS Manager dulu tanpa pemulih: oneshot + tanpa redial + tanpa timer.
+if printf '%s\n' "$XL" | grep -qx 'redial = yes' && printf '%s\n' "$XL" | grep -qx 'max redials = 32767'; then
+  ok "xl2tpd.conf: redial = yes + max redials eksplisit"
+else
+  bad "xl2tpd.conf tanpa redial — sesi yang putus tidak didial ulang"
+fi
+if printf '%s\n' "$XL" | grep -q '^autodial'; then
+  bad "xl2tpd.conf memuat autodial — bersama unit l2tp-* yang juga mendial = dua sesi"
+else
+  ok "xl2tpd.conf tanpa autodial (unit l2tp-* yang mendial saat boot)"
+fi
+WD=$(renderL '"/usr/local/sbin/vpn-watchdog-${TUNNEL_NAME}"')
+if [ -z "$WD" ]; then
+  bad "blok skrip watchdog tidak ketemu"
+else
+  if printf '%s\n' "$WD" | grep -q 'pgrep -x pppd'; then ok "watchdog menunggu pppd yang sedang bernegosiasi"
+  else bad "watchdog tanpa penjaga pppd — bisa membuka sesi kedua"; fi
+  if printf '%s\n' "$WD" | grep -qF 'systemctl restart "$UNIT"'; then ok "watchdog me-restart unit tunnel (urutan start yang teruji)"
+  else bad "watchdog tidak me-restart unit tunnel"; fi
+  if printf '%s\n' "$WD" | grep -qF "UNIT=\"l2tp-$TUNNEL_NAME.service\""; then ok "watchdog menunjuk unit tunnel yang benar"
+  else bad "nama unit di watchdog salah: $(printf '%s\n' "$WD" | grep UNIT=)"; fi
+  if bash -n <(printf '%s\n' "$WD"); then ok "skrip watchdog sintaksnya sah"; else bad "skrip watchdog rusak sintaksnya"; fi
+fi
+TM=$(renderL '"/etc/systemd/system/vpn-watchdog-${TUNNEL_NAME}.timer"')
+if printf '%s\n' "$TM" | grep -qx 'OnActiveSec=120s' && ! printf '%s\n' "$TM" | grep -q '^OnBootSec'; then
+  ok "timer watchdog memakai OnActiveSec (tak langsung menyala saat dipasang)"
+else
+  bad "timer watchdog: $(printf '%s\n' "$TM" | grep -E '^On')"
+fi
+p_wd=$(grep -n 'enable --now vpn-watchdog' "$SKRIP" | head -1 | cut -d: -f1)
+p_restart=$(grep -n 'elif ! systemctl restart "l2tp-' "$SKRIP" | head -1 | cut -d: -f1)
+if [ -n "$p_wd" ] && [ -n "$p_restart" ] && [ "$p_wd" -lt "$p_restart" ]; then
+  ok "watchdog dipasang SEBELUM start pertama (start gagal tetap dicoba ulang)"
+else
+  bad "watchdog dipasang sesudah start pertama (wd=$p_wd restart=$p_restart)"
+fi
+if grep -qF 'vpn-watchdog-${TUNNEL_NAME}.timer 2>/dev/null' "$SKRIP"; then ok "--uninstall mematikan timer watchdog"
+else bad "--uninstall tidak mematikan timer watchdog"; fi
 
 echo
 [ "$GAGAL" = 0 ] && { echo "Semua uji konfigurasi vpn-client lolos."; exit 0; }

@@ -104,6 +104,12 @@ Kalau mesin ini hidup di dalam VPN concentrator, sambungkan tunnelnya dengan
 > menolaknya sebelum mengubah apa pun dan menyebut obatnya (Docker →
 > `daemon.json` `198.18.0.0/15`). Alamat lain di 172.16.0.0/12 yang tidak
 > beririsan hanya diperingatkan. Uji: `make test-ruang-vpn`.
+>
+> **Tunnel yang putus naik lagi sendiri.** `xl2tpd.conf` memakai `redial = yes`
+> (sesi yang putus sesudah naik) dan `vpn-watchdog-<tunnel>.timer` memeriksa tiap
+> menit — tak ada sesi PPP dan tak ada pppd yang bernegosiasi → unit
+> `l2tp-<tunnel>` di-restart (termasuk `ipsec up`). Jejaknya di
+> `/var/log/vpn-watchdog.log`; mesin yang sehat tidak menulis apa pun ke sana.
 
 ## Persyaratan
 

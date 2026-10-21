@@ -249,9 +249,13 @@ fi
 
 if [ "$MODE" = "uninstall" ]; then
   log "Melepas tunnel dan berkas yang dibuat skrip ini"
+  jalankan "systemctl disable --now vpn-watchdog-${TUNNEL_NAME}.timer 2>/dev/null || true"
   jalankan "systemctl disable --now l2tp-${TUNNEL_NAME}.service 2>/dev/null || true"
   jalankan "ipsec down ${TUNNEL_NAME} 2>/dev/null || true"
   for f in "/etc/systemd/system/l2tp-${TUNNEL_NAME}.service" \
+           "/etc/systemd/system/vpn-watchdog-${TUNNEL_NAME}.service" \
+           "/etc/systemd/system/vpn-watchdog-${TUNNEL_NAME}.timer" \
+           "/usr/local/sbin/vpn-watchdog-${TUNNEL_NAME}" \
            "/etc/ppp/ip-up.d/00-vpn-routes" \
            "/etc/ppp/ip-up.d/00-vpn-routes.sh" \
            "/etc/ppp/ip-down.d/00-vpn-routes" \
@@ -402,6 +406,13 @@ require chap = yes
 refuse pap = yes
 require authentication = yes
 name = $VPN_USER
+; Sesi yang PUTUS sesudah sempat naik didial ulang xl2tpd sendiri. TANPA
+; autodial: unit l2tp-$TUNNEL_NAME yang mendial saat boot, dan autodial di sini
+; akan membuka sesi KEDUA ke concentrator yang sama. Dial pertama yang gagal &
+; xl2tpd yang mati ditangani vpn-watchdog-$TUNNEL_NAME.timer.
+redial = yes
+redial timeout = 15
+max redials = 32767
 EOF
 
 # ── 5. PPP ──────────────────────────────────────────────────────────────────
@@ -603,6 +614,71 @@ elif ! systemctl restart xl2tpd.service; then
   die "xl2tpd gagal start — lihat pesan di atas (sering: galat parsing /etc/xl2tpd/xl2tpd.conf)"
 fi
 jalankan "systemctl enable l2tp-${TUNNEL_NAME}.service >/dev/null"
+
+# ── Watchdog: tunnel yang PUTUS dan tidak naik lagi sendiri ─────────────────
+#
+# Sampai 21 Okt 2026 VM RADIUS Manager TIDAK punya pemulih apa pun: unit di
+# atas oneshot (mendial sekali saat boot), xl2tpd.conf tanpa redial, tanpa
+# timer. Tunnel yang putus — concentrator reboot, ISP kedip — tetap putus
+# sampai ada yang mengetik systemctl restart, sementara auth seluruh NAS di
+# concentrator itu mati. Appliance (freeradius-api) sudah punya tiga lapis
+# sejak 14 Okt; ini kembarannya untuk VM.
+#
+# Watchdog me-RESTART unit tunnel (bukan menulis "c" sendiri) supaya urutan
+# start yang sudah teruji — termasuk ipsec up kalau IPsec dipakai — dipakai
+# ulang apa adanya. Dipasang SEBELUM unit di-restart di bawah: kalau start
+# pertama gagal (PPP secret belum ada di concentrator), skrip berhenti di
+# sana, dan watchdog-lah yang akan mencobanya lagi tiap menit.
+tulis_berkas "/usr/local/sbin/vpn-watchdog-${TUNNEL_NAME}" <<EOF
+#!/usr/bin/env bash
+# $MARKER_TEKS
+# Dipanggil vpn-watchdog-${TUNNEL_NAME}.timer tiap menit. DIAM kalau tunnel
+# sehat; baris di /var/log/vpn-watchdog.log selalu berarti sesuatu terjadi.
+set -uo pipefail
+UNIT="l2tp-${TUNNEL_NAME}.service"
+LOG=/var/log/vpn-watchdog.log
+catat() { echo "\$(date -Is) ${TUNNEL_NAME}: \$*" >>"\$LOG"; }
+# Tunnel sudah dilepas (--uninstall) → tak ada yang perlu dijaga.
+systemctl is-enabled --quiet "\$UNIT" 2>/dev/null || exit 0
+# Ada alamat di ppp* → sehat.
+ip -4 -o addr show 2>/dev/null | grep -qE '^[0-9]+: ppp' && exit 0
+# pppd sedang bernegosiasi (atau redial xl2tpd sedang jalan): dial lagi
+# sekarang membuka sesi KEDUA. Tunggu satu siklus.
+pgrep -x pppd >/dev/null 2>&1 && exit 0
+systemctl is-active --quiet xl2tpd || { catat "xl2tpd mati — dinyalakan"; systemctl start xl2tpd || true; }
+catat "tidak ada sesi PPP — \$UNIT di-restart"
+systemctl restart "\$UNIT" || catat "restart \$UNIT GAGAL — journalctl -u \$UNIT -n 30"
+exit 0
+EOF
+jalankan "chmod 755 /usr/local/sbin/vpn-watchdog-${TUNNEL_NAME}"
+tulis_berkas "/etc/systemd/system/vpn-watchdog-${TUNNEL_NAME}.service" <<EOF
+# $MARKER_TEKS
+[Unit]
+Description=Pulihkan tunnel L2TP ${TUNNEL_NAME} kalau putus
+After=network-online.target xl2tpd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpn-watchdog-${TUNNEL_NAME}
+EOF
+tulis_berkas "/etc/systemd/system/vpn-watchdog-${TUNNEL_NAME}.timer" <<EOF
+# $MARKER_TEKS
+[Unit]
+Description=Periksa tunnel L2TP ${TUNNEL_NAME} tiap menit
+
+[Timer]
+# OnActiveSec, BUKAN OnBootSec: di mesin yang sudah lama menyala OnBootSec
+# sudah lewat, jadi timer akan langsung menyala saat diaktifkan dan merestart
+# tunnel yang SEDANG dinyalakan skrip ini.
+OnActiveSec=120s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
+jalankan "systemctl daemon-reload"
+jalankan "systemctl enable --now vpn-watchdog-${TUNNEL_NAME}.timer >/dev/null"
 # Sama alasannya dengan blok xl2tpd di atas: unit ini gagal dengan pesan yang
 # hanya ada di journal-nya sendiri. Membiarkannya bisu berarti operator cuma
 # melihat "Job for ... failed" dan harus menebak.
