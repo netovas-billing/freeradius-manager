@@ -288,7 +288,8 @@ else
 
 # Jumlah instance FreeRADIUS yang boleh hidup di mesin ini. Angka ini juga
 # dipakai ERP untuk menghitung rentang port yang perlu di-NAT di concentrator
-# — kalau dinaikkan, paste ulang skrip concentrator-nya.
+# — kalau dinaikkan, ubah juga Kapasitas VM di ERP; concentrator diperbarui
+# otomatis saat VM disimpan.
 #RM_API_CAPACITY_MAX=50
 
 # ── RM_API_API_PORT_START — ANGKANYA DITENTUKAN ERP, JANGAN DIKARANG ─────────

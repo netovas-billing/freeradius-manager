@@ -588,7 +588,7 @@ ExecStartPost=/bin/bash -c 'sleep 3 && echo "c $TUNNEL_NAME" > /var/run/xl2tpd/l
 # Hal yang sama berlaku untuk BACKTICK: heredoc tak berkutip menjalankannya juga,
 # bahkan di dalam komentar. Karena itu tak ada backtick maupun dolar tak-ter-escape
 # di blok unit ini; pakai kutip tunggal untuk mengutip nama perintah.
-ExecStartPost=/bin/bash -c 'for _ in {1..30}; do ip -4 -o addr show 2>/dev/null | grep -qE "^[0-9]+: ppp" && exit 0; sleep 1; done; echo "GAGAL: tunnel $TUNNEL_NAME tidak naik dalam 30 detik — tak ada alamat di antarmuka ppp mana pun." >&2; echo "       Sebab paling sering: PPP secret \"$VPN_USER\" BELUM ADA di concentrator $VPN_HOST." >&2; echo "       Tempel dulu skrip concentrator (VPN Concentrator -> Setup Script -> \"RADIUS di dalam VPN\"), lalu: systemctl restart l2tp-$TUNNEL_NAME" >&2; echo "       Periksa sebabnya: journalctl -u xl2tpd -n 50 --no-pager" >&2; exit 1'
+ExecStartPost=/bin/bash -c 'for _ in {1..30}; do ip -4 -o addr show 2>/dev/null | grep -qE "^[0-9]+: ppp" && exit 0; sleep 1; done; echo "GAGAL: tunnel $TUNNEL_NAME tidak naik dalam 30 detik — tak ada alamat di antarmuka ppp mana pun." >&2; echo "       Sebab paling sering: PPP secret \"$VPN_USER\" BELUM ADA di concentrator $VPN_HOST." >&2; echo "       PPP secret itu dibuat OTOMATIS oleh ERP saat VM disimpan. Cek status VM ini di ERP -> RADIUS Manager (kolom Status concentrator) atau tekan \"Pasang ke concentrator sekarang\", lalu: systemctl restart l2tp-$TUNNEL_NAME" >&2; echo "       Periksa sebabnya: journalctl -u xl2tpd -n 50 --no-pager" >&2; exit 1'
 ExecStop=/bin/bash -c 'echo "d $TUNNEL_NAME" > /var/run/xl2tpd/l2tp-control'
 $UNIT_STOPPOST
 

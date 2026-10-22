@@ -40,14 +40,26 @@ else
 fi
 
 # 3. Pesannya harus menyebut SEBAB YANG PALING SERING, bukan cuma "gagal".
-#    Orang yang terhalang di sini biasanya tidak tahu skrip concentrator ada.
-for frasa in 'PPP secret' 'Setup Script' 'journalctl'; do
+#    PPP secret dibuat OTOMATIS oleh ERP (sejak 22 Okt 2026 pesannya tidak lagi
+#    menyuruh menempel skrip concentrator): operator diarahkan ke halaman
+#    RADIUS Manager dan tombol "Pasang ke concentrator sekarang".
+for frasa in 'PPP secret' 'RADIUS Manager' 'Pasang ke concentrator sekarang' 'journalctl'; do
   if grep -qF "$frasa" <<<"$UNIT"; then
     ok "pesan gagal menyebut \"$frasa\""
   else
     bad "pesan gagal tidak menyebut \"$frasa\" — operator tak tahu harus ke mana"
   fi
 done
+
+# 3b. Pesan lama yang menyuruh MENEMPEL skrip concentrator tidak boleh kembali:
+#     sisi concentrator kini dipasang ERP lewat API, dan menyuruh operator
+#     menempel skrip mengarahkannya ke langkah yang tak perlu (dan tak bisa,
+#     bagi yang tak punya akses concentrator).
+if grep -qF 'Tempel dulu skrip concentrator' <<<"$UNIT"; then
+  bad "pesan gagal masih menyuruh menempel skrip concentrator"
+else
+  ok "pesan gagal tidak lagi menyuruh menempel skrip concentrator"
+fi
 
 # 4. Penulisan ke socket kontrol TETAP ada: verifikasi menggantikan keyakinan,
 #    bukan menggantikan perintah connect-nya.
