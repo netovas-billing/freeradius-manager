@@ -56,7 +56,7 @@ tidak pernah ditimpa saat install ulang):
 
 | Variabel | Kenapa penting |
 |---|---|
-| `RM_API_API_PUBLISH_IP` | Alamat yang **diumumkan ke backend**. Nilai ini tersimpan ke `radius_servers.url` setiap instance baru. Kosong → jatuh ke `0.0.0.0`, provisioning tetap "berhasil" tapi instance-nya tak bisa dihubungi siapa pun. Isi IP publik concentrator bila backend masuk lewat DSTNAT. |
+| `RM_API_API_PUBLISH_IP` | Alamat yang **diumumkan ke backend**. Nilai ini tersimpan ke `radius_servers.url` setiap instance baru. Kosong → jatuh ke `0.0.0.0`, provisioning tetap "berhasil" tapi instance-nya tak bisa dihubungi siapa pun. Isi IP publik concentrator bila backend masuk lewat DSTNAT. `install.sh` **menanyakannya** bila mesin punya IP publik (atau isi lewat `RM_INSTALL_PUBLISH_IP=<ip>`). |
 | `RM_API_LISTEN` | Alamat bind. **Portnya bagian dari blok yang dialokasikan ERP** (= `base`, lihat di bawah). Jangan diikat langsung ke IP tunnel — alamat itu baru ada setelah VPN naik, sehingga service gagal start saat boot. Pakai `0.0.0.0` + firewall. |
 | `RM_API_CAPACITY_MAX` | Jumlah instance yang boleh hidup di mesin ini. Ikut menentukan rentang port yang perlu di-NAT di concentrator — kalau dinaikkan, paste ulang skrip concentrator-nya. |
 | `RM_API_API_PORT_START` | Awal blok port HTTP freeradius-api di mesin ini (naik satu-satu per instance). **Angkanya ditentukan ERP** — lihat di bawah. Di luar `1024–64000` atau bukan angka → ditolak, kembali ke bawaan `8100` dengan `WARN`; nilai efektifnya dicatat di log tiap service start dan diumumkan di `/v1/server/info`. |

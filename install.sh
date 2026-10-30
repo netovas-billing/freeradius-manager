@@ -44,6 +44,43 @@ fail()  { printf "%s[FAIL]%s %s\n"   "$C_RED"    "$C_RESET" "$*" >&2; exit 1; }
 info()  { printf "%s[..]%s   %s\n"   "$C_CYAN"   "$C_RESET" "$*"; }
 phase() { PHASE=$((PHASE + 1)); printf "\n%s==> Phase %d/%d: %s%s\n" "$C_BOLD" "$PHASE" "$TOTAL_PHASES" "$*" "$C_RESET"; }
 
+# >>> publish-ip (diuji scripts/test-install-publish-ip.sh)
+# ip_publik_v4 — 0 kalau $1 IPv4 yang bisa dirutekan di internet (bukan
+# privat, CGNAT, loopback, link-local, multicast, atau 0.x).
+ip_publik_v4() {
+    local ip="$1" o
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    for o in "${BASH_REMATCH[@]:1}"; do (( 10#$o <= 255 )) || return 1; done
+    local a=$((10#${BASH_REMATCH[1]})) b=$((10#${BASH_REMATCH[2]}))
+    (( a == 0 || a == 10 || a == 127 || a >= 224 )) && return 1
+    (( a == 100 && b >= 64 && b <= 127 )) && return 1
+    (( a == 169 && b == 254 )) && return 1
+    (( a == 172 && b >= 16 && b <= 31 )) && return 1
+    (( a == 192 && b == 168 )) && return 1
+    return 0
+}
+
+# daftar_ip_publik — IPv4 publik yang terpasang di interface mesin ini.
+daftar_ip_publik() {
+    local ip
+    ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 |
+        while read -r ip; do ip_publik_v4 "$ip" && echo "$ip"; done
+    return 0
+}
+
+# publish_ip_sah — 0 kalau $1 layak diumumkan: IPv4 atau nama host, BUKAN
+# alamat yang tak bisa dihubungi dari luar mesin (0.0.0.0, loopback).
+publish_ip_sah() {
+    local v="$1"
+    [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+    [[ "$v" == "localhost" || "$v" == 0.0.0.0 || "$v" == 127.* ]] && return 1
+    if [[ "$v" =~ ^[0-9.]+$ ]]; then
+        [[ "$v" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    fi
+    return 0
+}
+# <<< publish-ip
+
 usage() {
     cat <<EOF
 install.sh - One-command installer for radius-manager-api.
@@ -63,6 +100,10 @@ ENVIRONMENT (defaults shown)
       Batasi aksesnya di lapis jaringan, bukan di sini: allow-list dstnat di
       concentrator sudah menjadi pintunya. Untuk memaksa loopback saja:
           sudo RM_INSTALL_BIND=127.0.0.1:9000 bash install.sh
+  RM_INSTALL_PUBLISH_IP=                 Alamat yang diumumkan ke backend
+      (RM_API_API_PUBLISH_IP). Kosong + mesin punya IP publik + ada terminal →
+      installer MENANYAKANNYA. Diisi → tidak ditanya. Hanya ditulis kalau
+      $ENV_FILE belum punya RM_API_API_PUBLISH_IP aktif.
   RM_INSTALL_REPO=...freeradius-manager.git  Source repo (curl|bash mode only).
   RM_INSTALL_BRANCH=master              Branch to clone.
   RM_INSTALL_DIR=/opt/freeradius-manager  Clone target.
@@ -325,7 +366,45 @@ else
 #RM_API_API_PORT_START=20100
 ENVEOF
     chmod 0600 "$ENV_FILE"
-    ok "wrote $ENV_FILE (0600) - isi RM_API_API_PUBLISH_IP sebelum dipakai"
+    ok "wrote $ENV_FILE (0600)"
+fi
+
+# RM_API_API_PUBLISH_IP DITANYAKAN, bukan hanya diperingatkan di ringkasan.
+# Kosong → setiap instance lahir dengan URL http://0.0.0.0:<port>, provisioning
+# tetap dilaporkan sukses, dan peringatan kuning di akhir output installer
+# terbukti terlewat di lapangan (30 Okt 2026).
+#
+# Hanya ditanyakan kalau mesin ini PUNYA IP publik di interface-nya: VM di
+# belakang VPN/NAT mengumumkan IP publik concentrator, dan nilai itu sudah
+# diisi skrip pemasangan dari ERP — menanyakannya di sini hanya mengundang
+# jawaban yang salah.
+if grep -qE '^[[:space:]]*RM_API_API_PUBLISH_IP=' "$ENV_FILE" 2>/dev/null; then
+    ok "RM_API_API_PUBLISH_IP sudah diisi di $ENV_FILE - tidak diubah"
+else
+    publish_ip="${RM_INSTALL_PUBLISH_IP:-}"
+    if [[ -z "$publish_ip" ]]; then
+        mapfile -t ip_publik < <(daftar_ip_publik)
+        if (( ${#ip_publik[@]} == 0 )); then
+            info "mesin ini tidak punya IP publik di interface - RM_API_API_PUBLISH_IP tidak ditanyakan"
+        elif ! { : </dev/tty; } 2>/dev/null; then
+            warn "mesin ini punya IP publik (${ip_publik[*]}) tapi tak ada terminal untuk bertanya"
+            warn "  → jalankan ulang dengan RM_INSTALL_PUBLISH_IP=<ip> atau isi $ENV_FILE"
+        else
+            info "mesin ini punya IP publik: ${ip_publik[*]}"
+            info "isi alamat yang dipakai ERP untuk menghubungi server ini (host di API URL-nya)"
+            while :; do
+                read -r -p "  RM_API_API_PUBLISH_IP [${ip_publik[0]}]: " publish_ip </dev/tty || publish_ip=""
+                publish_ip="${publish_ip:-${ip_publik[0]}}"
+                publish_ip_sah "$publish_ip" && break
+                warn "\"$publish_ip\" tidak sah - isi IPv4 atau nama host, bukan 0.0.0.0/loopback"
+            done
+        fi
+    fi
+    if [[ -n "$publish_ip" ]]; then
+        publish_ip_sah "$publish_ip" || fail "RM_INSTALL_PUBLISH_IP=\"$publish_ip\" tidak sah (IPv4 atau nama host, bukan 0.0.0.0/loopback)"
+        printf '\nRM_API_API_PUBLISH_IP=%s\n' "$publish_ip" >> "$ENV_FILE"
+        ok "RM_API_API_PUBLISH_IP=$publish_ip ditulis ke $ENV_FILE"
+    fi
 fi
 
 # -- Phase 8: state + log dirs ------------------------------------------------

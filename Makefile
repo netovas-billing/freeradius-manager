@@ -34,10 +34,13 @@ test-vpn-config: ## Uji berkas konfigurasi terbitan vpn-client-setup.sh (tanpa r
 test-vpn-unit-tunnel: ## Unit tunnel systemd membuktikan tunnelnya naik (bukan cuma mengantre connect).
 	bash scripts/test-vpn-unit-tunnel.sh
 
+test-install-publish-ip: ## Uji pertanyaan RM_API_API_PUBLISH_IP di install.sh (tanpa root).
+	./scripts/test-install-publish-ip.sh
+
 test-install-unit: ## Uji unit systemd terbitan install.sh (tanpa root).
 	./scripts/test-install-unit.sh
 
-test-scripts: test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel test-ruang-vpn ## Semua uji sisi skrip.
+test-scripts: test-install-publish-ip test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel test-ruang-vpn ## Semua uji sisi skrip.
 
 test-race: ## Run unit tests with the race detector.
 	$(GO) test -race ./...
@@ -97,6 +100,6 @@ clean: ## Remove build artifacts.
 	rm -rf bin
 	$(GO) clean -testcache
 
-.PHONY: help build test test-port-block test-ruang-vpn test-vpn-config test-install-unit test-vpn-unit-tunnel test-scripts test-race test-integration test-integration-compose vet \
+.PHONY: help build test test-install-publish-ip test-port-block test-ruang-vpn test-vpn-config test-install-unit test-vpn-unit-tunnel test-scripts test-race test-integration test-integration-compose vet \
         docker-up docker-down docker-clean docker-logs docker-shell docker-token docker-supervisor \
         e2e tidy fmt clean
