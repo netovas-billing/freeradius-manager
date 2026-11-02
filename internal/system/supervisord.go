@@ -18,7 +18,8 @@ import (
 // Translation strategy:
 //
 //   - WriteUnit parses a small subset of the systemd unit format that
-//     internal/manager.renderAPIServiceUnit emits (WorkingDirectory,
+//     internal/manager.renderAPIServiceUnitGo emits (and the uvicorn units of
+//     legacy Python instances already on disk) (WorkingDirectory,
 //     ExecStart, User, Restart=always) and writes an equivalent
 //     [program:<name>] section to ConfDir/<name>.conf.
 //   - DaemonReload runs `supervisorctl reread && supervisorctl update`

@@ -140,20 +140,3 @@ func TestMockGit_FailureInjection(t *testing.T) {
 		t.Fatalf("got %v want %v", err, want)
 	}
 }
-
-func TestMockPython_VenvAndPip(t *testing.T) {
-	p := NewMockPython()
-	ctx := context.Background()
-	if err := p.CreateVenv(ctx, "/v"); err != nil {
-		t.Fatal(err)
-	}
-	if !p.Venvs["/v"] {
-		t.Fatal("venv should be recorded")
-	}
-	if err := p.PipInstall(ctx, "/v", "/r.txt"); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(p.Calls))
-	}
-}

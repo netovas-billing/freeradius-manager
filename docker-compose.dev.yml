@@ -90,9 +90,11 @@ services:
       RM_API_INSTANCE_DB_HOST: "mariadb"
       RM_API_INSTANCE_DB_PORT: "3306"
 
-      # freeradius-api bootstrap (template-once + copy per instance).
-      RM_API_BOOTSTRAP_REPO: "https://github.com/heirro/freeradius-api"
-      RM_API_BOOTSTRAP_TEMPLATE_DIR: "/var/lib/radius-manager-api/freeradius-api-template"
+      # freeradius-api bootstrap (runtime Go; template-once + biner per instance).
+      # Catatan: stage runtime Dockerfile belum membawa toolchain Go, jadi
+      # create instance di container ini masih gagal saat `go build`.
+      RM_API_GO_REPO: "https://github.com/netovas-billing/freeradius-api"
+      RM_API_GO_TEMPLATE_DIR: "/var/lib/radius-manager-api/freeradius-api-go-template"
 
       # v0.3.0 maintenance timers (autoclearzombie + autobackups3).
       # supervisord backend matches the systemd backend choice above —

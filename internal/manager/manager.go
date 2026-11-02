@@ -19,6 +19,12 @@ var (
 	ErrInstanceExists   = errors.New("instance already exists")
 	ErrPortExhausted    = errors.New("no available port in range")
 	ErrInvalidName      = errors.New("invalid instance name")
+
+	// ErrBootstrapTidakAktif — create ditolak karena bootstrap freeradius-api
+	// (runtime Go) tidak dikonfigurasi. Lihat CreateInstance.
+	ErrBootstrapTidakAktif = errors.New("create ditolak: bootstrap freeradius-api (runtime Go) tidak aktif — " +
+		"isi RM_API_GO_REPO di /etc/radius-manager-api/env lalu restart radius-manager-api; " +
+		"tanpa itu tak ada yang memasang aplikasi API instance")
 )
 
 type Manager interface {
@@ -86,11 +92,12 @@ type Config struct {
 	APIPortStart int
 	Listen       string
 
-	// freeradius-api bootstrap (v0.2.0). When non-nil, CreateInstance
-	// will git-clone the template (once), copy it into APIDir, set up
-	// the Python venv, and write `.env` before starting the systemd unit.
-	// When nil, CreateInstance assumes the API directory has been
-	// pre-provisioned out of band (the v0.1.x behavior).
+	// Bootstrap freeradius-api (runtime Go). CreateInstance meng-clone
+	// template (sekali), membangun + menyalin biner ke APIDir, dan menulis
+	// `.env` sebelum unit systemd dijalankan. WAJIB untuk create: bila nil,
+	// CreateInstance DITOLAK (ErrBootstrapTidakAktif) — tak ada lagi asumsi
+	// direktori API disiapkan di luar jalur ini. Operasi lain (start/stop/
+	// delete/list) tidak membutuhkannya.
 	APIBootstrap *FreeRADIUSAPIBootstrap
 
 	// Maintenance schedules per-instance autoclearzombie + autobackups3

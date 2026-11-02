@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/netovas-billing/freeradius-manager/pkg/types"
@@ -12,7 +13,8 @@ import (
 // DeleteInstance is the inverse of CreateInstance, in reverse step order:
 //
 //  1. Stop + disable + remove systemd unit (so freeradius-api releases DB
-//     before we drop it).
+//     before we drop it), lalu hapus direktori API instance
+//     (<APIDirBase>/<nama>-api) — selaras dengan `radius-manager.sh delete`.
 //  2. Remove FreeRADIUS sites/mods configs (both available + enabled symlink).
 //  3. Reload FreeRADIUS so it stops listening on the instance ports.
 //  4. Drop database + user (only when withDB=true).
@@ -56,6 +58,19 @@ func (i *impl) DeleteInstance(ctx context.Context, name string, withDB bool) (*t
 	keep(i.cfg.Systemctl.RemoveUnit(ctx, unitName))
 	keep(i.cfg.Systemctl.DaemonReload(ctx))
 
+	// 1b. Hapus direktori API instance, SESUDAH unitnya berhenti.
+	//
+	// Kenapa ikut dihapus: dulu direktori ini tertinggal. Untuk instance Python
+	// lama artinya venv/ tetap ada, dan create ulang dengan NAMA YANG SAMA
+	// ditolak permanen oleh penjaga venv di setupInstanceGo — padahal pesannya
+	// menyuruh "hapus instance itu dulu", yang justru sudah dilakukan. Bash
+	// `delete` juga menghapusnya; kedua jalur harus meninggalkan mesin yang sama.
+	if dir, err := i.direktoriAPIAman(name); err != nil {
+		keep(err)
+	} else {
+		keep(i.cfg.FS.RemoveDir(ctx, dir))
+	}
+
 	// 2. Remove FreeRADIUS configs.
 	for _, j := range []struct{ kind, modName string }{
 		{"sites", name},
@@ -97,4 +112,27 @@ func (i *impl) DeleteInstance(ctx context.Context, name string, withDB bool) (*t
 		DeletedAt:       time.Now().UTC(),
 		DatabaseDropped: dbDropped,
 	}, nil
+}
+
+// direktoriAPIAman merakit <APIDirBase>/<nama>-api dan MENOLAK apa pun yang
+// bisa membuat RemoveDir (rm -rf) mendarat di luar APIDirBase.
+//
+// validateName di pemanggil sudah menolak nama kosong/bergaris miring, tapi
+// penghapusan rekursif terlalu mahal untuk bergantung pada satu lapis: nama
+// kosong akan menghasilkan "<base>/-api", dan APIDirBase yang salah isi ("/"
+// atau relatif) akan mengarahkan rm -rf ke tempat yang tak terduga. Jadi
+// diperiksa ulang di sini, tepat sebelum menghapus.
+func (i *impl) direktoriAPIAman(name string) (string, error) {
+	if err := validateName(name); err != nil {
+		return "", fmt.Errorf("hapus direktori API: %w", err)
+	}
+	base := filepath.Clean(i.apiDirBase())
+	if !filepath.IsAbs(base) || base == string(filepath.Separator) {
+		return "", fmt.Errorf("hapus direktori API: APIDirBase %q tidak aman (harus path absolut selain /)", base)
+	}
+	dir := filepath.Join(base, name+"-api")
+	if filepath.Dir(dir) != base || filepath.Base(dir) != name+"-api" {
+		return "", fmt.Errorf("hapus direktori API: %q keluar dari %q", dir, base)
+	}
+	return dir, nil
 }

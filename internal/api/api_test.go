@@ -354,6 +354,27 @@ func TestCreate_501OnNotImplemented(t *testing.T) {
 	}
 }
 
+// Bootstrap Go tak aktif = konfigurasi server, bukan bug → 503, bukan 500,
+// dan pesan perbaikan dari manager harus sampai ke pemanggil.
+func TestCreate_503OnBootstrapTidakAktif(t *testing.T) {
+	stub := &stubManager{createErr: manager.ErrBootstrapTidakAktif}
+	h, _ := newTestServer(t, stub)
+	w := do(t, h, http.MethodPost, "/v1/instances", "good", strings.NewReader(`{"name":"foo"}`))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	var body types.APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json body: %v", err)
+	}
+	if body.Error != "bootstrap_inactive" {
+		t.Errorf("expected error=bootstrap_inactive, got %q", body.Error)
+	}
+	if body.Message != manager.ErrBootstrapTidakAktif.Error() {
+		t.Errorf("pesan perbaikan hilang: %q", body.Message)
+	}
+}
+
 // ---------- GetInstance tests -------------------------------------------
 
 func TestGet_404OnNotFound(t *testing.T) {

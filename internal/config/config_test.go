@@ -163,36 +163,36 @@ func TestParseAPIPortStart(t *testing.T) {
 	}
 }
 
-// Bawaan runtime freeradius-api = "go".
-//
-// Ini bukan preferensi gaya: permintaannya adalah instance BARU memakai Go.
-// Sebelumnya bawaannya "python" sehingga `create` tetap memasang aplikasi Python
-// dan sakelar Go tak pernah terpakai oleh siapa pun yang tidak menyetel env —
-// yaitu semua orang. Kalau baris ini berbalik, gejalanya persis itu lagi:
-// tak ada galat, semuanya "berhasil", tapi yang terpasang Python.
-func TestAPIRuntime_BawaanGo(t *testing.T) {
-	t.Setenv("RM_API_TOKEN", "devtoken")
-	t.Setenv("RM_API_RUNTIME", "")
-	c, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.APIRuntime != "go" {
-		t.Fatalf("bawaan RM_API_RUNTIME harus \"go\", dapat %q", c.APIRuntime)
+// RM_API_RUNTIME kosong atau "go" (berikut variasi huruf/spasi yang lazim di
+// berkas env sunting-tangan) DITERIMA: itu satu-satunya runtime, dan mesin yang
+// belum pernah menyetelnya tidak boleh gagal boot karena perubahan ini.
+func TestAPIRuntime_KosongAtauGoDiterima(t *testing.T) {
+	for _, nilai := range []string{"", "go", "GO", "  go  "} {
+		t.Setenv("RM_API_TOKEN", "devtoken")
+		t.Setenv("RM_API_RUNTIME", nilai)
+		if _, err := Load(); err != nil {
+			t.Fatalf("RM_API_RUNTIME=%q ditolak: %v", nilai, err)
+		}
 	}
 }
 
-// Dan jalan keluarnya harus tetap ada: satu mesin boleh dipaksa kembali ke
-// Python tanpa menyunting kode.
-func TestAPIRuntime_BisaDipaksaPython(t *testing.T) {
-	t.Setenv("RM_API_TOKEN", "devtoken")
-	t.Setenv("RM_API_RUNTIME", "python")
-	c, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.APIRuntime != "python" {
-		t.Fatalf("RM_API_RUNTIME=python tidak dihormati: %q", c.APIRuntime)
+// Runtime Python sudah dibuang (30 Okt 2026). RM_API_RUNTIME=python yang masih
+// tertinggal di /etc/radius-manager-api/env harus membuat boot GAGAL dengan
+// pesan yang menyebut cara memperbaikinya — bukan diterima diam-diam lalu
+// memasang Go, yang berarti mesin melakukan hal berbeda dari yang tertulis.
+func TestAPIRuntime_PythonDitolak(t *testing.T) {
+	for _, nilai := range []string{"python", "PYTHON", " python ", "rust"} {
+		t.Setenv("RM_API_TOKEN", "devtoken")
+		t.Setenv("RM_API_RUNTIME", nilai)
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("RM_API_RUNTIME=%q diterima — seharusnya boot gagal", nilai)
+		}
+		for _, wajib := range []string{"RM_API_RUNTIME", "/etc/radius-manager-api/env"} {
+			if !strings.Contains(err.Error(), wajib) {
+				t.Fatalf("pesan galat tidak menyebut %q: %v", wajib, err)
+			}
+		}
 	}
 }
 

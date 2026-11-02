@@ -118,8 +118,9 @@ Kalau mesin ini hidup di dalam VPN concentrator, sambungkan tunnelnya dengan
 - Paket berikut (auto-install jika belum ada):
   - `freeradius`, `freeradius-utils`, `freeradius-mysql`
   - `mariadb-client`
-  - `python3`, `python3-venv`
   - `git`, `openssl`, `iproute2`
+  - Toolchain Go di `/usr/local/go` (dipasang `install.sh`) — untuk membangun
+    biner freeradius-api per mesin
 
 ---
 
@@ -129,15 +130,22 @@ Script utama untuk membuat, mengelola, dan menghapus instance FreeRADIUS beserta
 
 ### Yang dilakukan saat `create`
 
-1. Membuat database & user MariaDB khusus instance
-2. Mengimport schema FreeRADIUS ke database
-3. Membuat SQL module (`sql_<nama>`) dan EAP module (`eap_<nama>`)
-4. Membuat virtual server & inner tunnel dengan port acak yang belum terpakai
-5. Meng-clone repo [freeradius-api](https://github.com/heirro/freeradius-api) ke `/root/<nama>-api/`
-6. Mengisi `.env` API dengan credentials database dan Swagger secara otomatis
+1. Menyiapkan template [freeradius-api](https://github.com/netovas-billing/freeradius-api) (runtime Go) sekali per mesin dan membangun binernya — **sebelum** database/port/FreeRADIUS disentuh, jadi repo privat tanpa kredensial atau toolchain Go yang absen menggagalkan create tanpa meninggalkan instance setengah jadi
+2. Membuat database & user MariaDB khusus instance
+3. Mengimport schema FreeRADIUS ke database
+4. Membuat SQL module (`sql_<nama>`) dan EAP module (`eap_<nama>`)
+5. Membuat virtual server & inner tunnel dengan port acak yang belum terpakai
+6. Menyalin biner + skrip pemeliharaan ke `/root/<nama>-api/` dan mengisi `.env` API dengan credentials database dan Basic auth secara otomatis
 7. Mengisi credentials di `autoclearzombie.sh` + membuat cron job (tiap 30 menit)
 8. Mengisi credentials di `autobackups3.sh` + membuat cron job backup S3 (tiap hari jam 02:00)
 9. Membuat dan mengaktifkan systemd service untuk REST API
+
+> **Runtime Python sudah dibuang (30 Okt 2026).** Satu-satunya runtime
+> freeradius-api adalah Go. `API_RUNTIME` (bash) / `RM_API_RUNTIME`
+> (radius-manager-api) hanya menerima kosong atau `go`; nilai lain seperti
+> `python` membuat `create` (bash) dan boot radius-manager-api gagal dengan
+> pesan jelas — hapus baris itu dari `/etc/radius-manager-api/env`. Instance
+> Python **lama** yang sudah berjalan tetap bisa di-start/stop/restart/delete.
 
 ### Port yang di-assign per instance
 
@@ -374,10 +382,11 @@ Contoh output:
 /root/
 ├── radius-manager.sh
 ├── update-api.sh
-└── <nama>-api/               # Clone repo API per instance
+└── <nama>-api/               # Direktori API per instance
+    ├── freeradius-api        # Biner Go (disalin dari template)
     ├── .env                  # Credentials (auto-generated, chmod 600)
     ├── autoclearzombie.sh    # Auto clear zombie sessions (auto-patched)
-    └── venv/
+    └── autobackups3.sh       # Backup DB ke S3 (auto-patched)
 
 /etc/systemd/system/
 └── <nama>-api.service        # Service systemd per instance

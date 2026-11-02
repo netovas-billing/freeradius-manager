@@ -97,10 +97,12 @@ Environment (read by 'serve'):
                            Values outside 1024-64000 are ignored (default is used, with a WARN).
   RM_API_DB_DSN            MariaDB DSN for management (e.g. root@unix(/var/run/mysqld/mysqld.sock)/);
                            when unset, write operations return 501 Not Implemented (read-only mode)
-  RM_API_BOOTSTRAP_REPO            git URL for the freeradius-api repo; when empty, v0.2.0
-                                   bootstrap (clone + venv + .env per instance) is skipped
-  RM_API_BOOTSTRAP_TEMPLATE_DIR    where the cloned template lives, default /var/lib/radius-manager-api/freeradius-api-template
+  RM_API_GO_REPO                   git URL for the freeradius-api (Go) repo, default
+                                   https://github.com/netovas-billing/freeradius-api
+  RM_API_GO_REF                    tag/branch/commit to pin the template to (empty = default branch)
+  RM_API_GO_TEMPLATE_DIR           where the cloned template lives, default /var/lib/radius-manager-api/freeradius-api-go-template
   RM_API_BOOTSTRAP_SKIP_PULL       set to "true" to disable git pull on every EnsureTemplate
+  RM_API_RUNTIME                   legacy; only empty or "go" is accepted (the Python runtime was removed)
   RM_API_SYSTEMD_BACKEND           "systemd" (default, real Linux) or "supervisord" (Docker dev)
   RM_API_INSTANCE_DB_HOST          DB host written into per-instance configs, default localhost
   RM_API_INSTANCE_DB_PORT          DB port written into per-instance configs, default 3306
@@ -251,49 +253,37 @@ func runServe() error {
 		managerCfg.FS = fs
 		managerCfg.DynamicClientNet = cfg.DynamicClientNet
 
-		// Optional v0.2.0 bootstrap. Skipped when RM_API_BOOTSTRAP_REPO empty,
-		// preserving v0.1.x behavior where the API directory is provisioned
-		// out of band (e.g., by radius-manager.sh).
-		// Gerbangnya melihat KEDUA repo: saat RM_API_RUNTIME=go, repo Python
-		// boleh kosong dan yang terisi justru RM_API_GO_REPO.
-		pakaiGo := strings.EqualFold(strings.TrimSpace(cfg.APIRuntime), manager.RuntimeGo)
-		if cfg.BootstrapAPIRepo != "" || (pakaiGo && cfg.BootstrapGoRepo != "") {
+		// Bootstrap freeradius-api (runtime Go — satu-satunya runtime sejak
+		// 30 Okt 2026). Gerbangnya cukup RM_API_GO_REPO, yang selalu punya
+		// bawaan. Kalau suatu hari kosong juga, bootstrap mati dan create
+		// DITOLAK (lihat CreateInstance) — bukan menulis unit yang menunjuk
+		// direktori kosong lalu melapor sukses.
+		if cfg.BootstrapGoRepo != "" {
 			managerCfg.APIBootstrap = &manager.FreeRADIUSAPIBootstrap{
-				RepoURL:     cfg.BootstrapAPIRepo,
-				TemplateDir: cfg.BootstrapTemplateDir,
-				SkipPull:    cfg.BootstrapSkipPull,
-
-				Runtime:       cfg.APIRuntime,
+				SkipPull:      cfg.BootstrapSkipPull,
 				GoRepoURL:     cfg.BootstrapGoRepo,
 				GoRef:         cfg.BootstrapGoRef,
 				GoTemplateDir: cfg.BootstrapGoTemplateDir,
 
-				Git:    system.NewRealGit(),
-				Python: system.NewRealPython(),
-				Go:     system.NewRealGo(),
-				FS:     fs,
+				Git: system.NewRealGit(),
+				Go:  system.NewRealGo(),
+				FS:  fs,
 			}
-			if pakaiGo {
-				// Versi yang dipasang dicatat sekali di boot: tanpa RM_API_GO_REF
-				// yang di-pin, `git clone` mengambil branch bawaan apa adanya dan
-				// "instance ini menjalankan kode yang mana" tak terjawab nanti.
-				ref := cfg.BootstrapGoRef
-				if ref == "" {
-					ref = "(branch bawaan — TIDAK dipaku)"
-				}
-				logger.Info("freeradius-api bootstrap enabled (runtime GO)",
-					slog.String("repo", cfg.BootstrapGoRepo),
-					slog.String("ref", ref),
-					slog.String("template_dir", cfg.BootstrapGoTemplateDir),
-					slog.Bool("skip_pull", cfg.BootstrapSkipPull),
-				)
-			} else {
-				logger.Info("freeradius-api bootstrap enabled",
-					slog.String("repo", cfg.BootstrapAPIRepo),
-					slog.String("template_dir", cfg.BootstrapTemplateDir),
-					slog.Bool("skip_pull", cfg.BootstrapSkipPull),
-				)
+			// Versi yang dipasang dicatat sekali di boot: tanpa RM_API_GO_REF
+			// yang di-pin, `git clone` mengambil branch bawaan apa adanya dan
+			// "instance ini menjalankan kode yang mana" tak terjawab nanti.
+			ref := cfg.BootstrapGoRef
+			if ref == "" {
+				ref = "(branch bawaan — TIDAK dipaku)"
 			}
+			logger.Info("freeradius-api bootstrap enabled (runtime GO)",
+				slog.String("repo", cfg.BootstrapGoRepo),
+				slog.String("ref", ref),
+				slog.String("template_dir", cfg.BootstrapGoTemplateDir),
+				slog.Bool("skip_pull", cfg.BootstrapSkipPull),
+			)
+		} else {
+			logger.Warn("RM_API_GO_REPO kosong — bootstrap freeradius-api MATI; create instance akan ditolak")
 		}
 
 		// v0.3.0 maintenance timers. Independent backend selection from

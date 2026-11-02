@@ -325,47 +325,6 @@ func (g *RealGit) Pull(ctx context.Context, dir string) error {
 	return nil
 }
 
-// RealPython shells out to the system python3 + pip.
-type RealPython struct {
-	Bin string // default "python3"
-}
-
-func NewRealPython() *RealPython { return &RealPython{Bin: "python3"} }
-
-func (p *RealPython) bin() string {
-	if p.Bin == "" {
-		return "python3"
-	}
-	return p.Bin
-}
-
-func (p *RealPython) CreateVenv(ctx context.Context, venvDir string) error {
-	// Idempotent: skip if a python interpreter already lives there.
-	if _, err := os.Stat(filepath.Join(venvDir, "bin", "python")); err == nil {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Join(venvDir, "bin", "python3")); err == nil {
-		return nil
-	}
-	cmd := exec.CommandContext(ctx, p.bin(), "-m", "venv", venvDir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("python -m venv %s: %w; output: %s", venvDir, err, out)
-	}
-	return nil
-}
-
-func (p *RealPython) PipInstall(ctx context.Context, venvDir, requirementsFile string) error {
-	pip := filepath.Join(venvDir, "bin", "pip")
-	cmd := exec.CommandContext(ctx, pip, "install", "-q", "-r", requirementsFile)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pip install -r %s in %s: %w; output: %s",
-			requirementsFile, venvDir, err, out)
-	}
-	return nil
-}
-
 // RealGo menjalankan toolchain Go yang sudah dipasang install.sh di
 // /usr/local/go (lihat install.sh: unduh + ekstrak + tambah ke PATH).
 // goCacheDir — cache build bersama untuk semua instance di satu mesin.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -290,8 +291,22 @@ func (m *MockFilesystem) RemoveDir(_ context.Context, path string) error {
 		m.mu.Unlock()
 		return err
 	}
+	// Meniru `rm -rf`: direktori itu beserta SEMUA isinya (berkas & subdir
+	// yang tercatat) hilang. Tanpa ini tes delete tak bisa membuktikan isi
+	// direktori instance benar-benar terhapus.
+	prefix := strings.TrimSuffix(path, "/") + "/"
 	if m.Dirs != nil {
 		delete(m.Dirs, path)
+		for d := range m.Dirs {
+			if strings.HasPrefix(d, prefix) {
+				delete(m.Dirs, d)
+			}
+		}
+	}
+	for f := range m.Files {
+		if strings.HasPrefix(f, prefix) {
+			delete(m.Files, f)
+		}
 	}
 	m.mu.Unlock()
 	return nil
@@ -361,40 +376,6 @@ func (g *MockGit) Pull(_ context.Context, dir string) error {
 	g.Calls = append(g.Calls, Call{Method: "Pull", Args: []string{dir}})
 	g.mu.Unlock()
 	return g.Failures["Pull"]
-}
-
-// MockPython records venv + pip operations.
-type MockPython struct {
-	mu       sync.Mutex
-	Calls    []Call
-	Venvs    map[string]bool // venvDir -> created
-	Failures map[string]error
-}
-
-func NewMockPython() *MockPython {
-	return &MockPython{
-		Venvs:    map[string]bool{},
-		Failures: map[string]error{},
-	}
-}
-
-func (p *MockPython) CreateVenv(_ context.Context, venvDir string) error {
-	p.mu.Lock()
-	p.Calls = append(p.Calls, Call{Method: "CreateVenv", Args: []string{venvDir}})
-	if err := p.Failures["CreateVenv"]; err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	p.Venvs[venvDir] = true
-	p.mu.Unlock()
-	return nil
-}
-
-func (p *MockPython) PipInstall(_ context.Context, venvDir, requirementsFile string) error {
-	p.mu.Lock()
-	p.Calls = append(p.Calls, Call{Method: "PipInstall", Args: []string{venvDir, requirementsFile}})
-	p.mu.Unlock()
-	return p.Failures["PipInstall"]
 }
 
 // MockGo mencatat build biner Go.

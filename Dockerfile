@@ -39,9 +39,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Single RUN to keep layers compact. We need:
 #   freeradius / freeradius-mysql : the RADIUS daemon + SQL backend module.
 #   mariadb-client                : entrypoint waits on the MariaDB service.
-#   python3 / python3-venv / pip  : per-instance freeradius-api venv setup.
 #   git                           : RM-API clones the freeradius-api repo.
 #   supervisor                    : option-B PID 1 (no systemd in container).
+#                                   (python3 ikut sebagai dependensinya; paket
+#                                   python3-venv/pip tak dipasang lagi karena
+#                                   runtime Python freeradius-api sudah dibuang.)
 #   curl, ca-certificates         : healthchecks + outbound HTTPS for git.
 #   iproute2                      : `ss`/`ip` for debugging from inside.
 #   gosu                          : drop privileges in entrypoint if needed.
@@ -51,9 +53,6 @@ RUN apt-get update \
         freeradius \
         freeradius-mysql \
         mariadb-client \
-        python3 \
-        python3-venv \
-        python3-pip \
         git \
         supervisor \
         curl \

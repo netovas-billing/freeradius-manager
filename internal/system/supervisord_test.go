@@ -9,7 +9,7 @@ import (
 )
 
 // TestSupervisordSystemctl_WriteUnit_TranslatesSystemdUnitToProgram verifies that
-// WriteUnit takes a systemd-style unit (the renderAPIServiceUnit output from
+// WriteUnit takes a systemd-style unit (the renderAPIServiceUnitGo output from
 // internal/manager) and produces an equivalent supervisord [program:...]
 // section. This is the core of option B: unit-of-measure stays the systemd
 // unit name, but the on-disk artifact is supervisord conf.
@@ -25,16 +25,16 @@ func TestSupervisordSystemctl_WriteUnit_TranslatesSystemdUnitToProgram(t *testin
 		FreeradiusUser: "root",
 	}
 
-	// Sample unit equivalent to manager.renderAPIServiceUnit output.
+	// Sample unit equivalent to manager.renderAPIServiceUnitGo output.
 	unit := `[Unit]
-Description=RadiusAPI with Uvicorn - mitra_x
+Description=RadiusAPI (Go) - mitra_x
 After=network.target
 
 [Service]
 User=root
 Group=root
 WorkingDirectory=/root/mitra_x-api
-ExecStart=/root/mitra_x-api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8100 --workers 4
+ExecStart=/root/mitra_x-api/freeradius-api
 Restart=always
 RestartSec=5
 SyslogIdentifier=mitra_x-api
@@ -56,7 +56,7 @@ WantedBy=multi-user.target
 	gotStr := string(got)
 	mustContain := []string{
 		"[program:mitra_x-api]",
-		"command=/root/mitra_x-api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8100 --workers 4",
+		"command=/root/mitra_x-api/freeradius-api",
 		"directory=/root/mitra_x-api",
 		"autorestart=true",
 		"user=root",

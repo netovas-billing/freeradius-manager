@@ -8,19 +8,14 @@ import (
 	"github.com/netovas-billing/freeradius-manager/internal/system"
 )
 
-func bootstrapGo() (*FreeRADIUSAPIBootstrap, *system.MockGit, *system.MockPython, *system.MockGo, *system.MockFilesystem) {
+func bootstrapGo() (*FreeRADIUSAPIBootstrap, *system.MockGit, *system.MockGo, *system.MockFilesystem) {
 	g := system.NewMockGit()
-	py := system.NewMockPython()
 	gо := system.NewMockGo()
 	fs := system.NewMockFilesystem()
 	b := &FreeRADIUSAPIBootstrap{
-		RepoURL:       "https://github.com/heirro/freeradius-api",
-		TemplateDir:   "/var/lib/radius-manager-api/freeradius-api-template",
-		Runtime:       RuntimeGo,
 		GoRepoURL:     "https://github.com/netovas-billing/freeradius-api",
 		GoTemplateDir: "/var/lib/radius-manager-api/freeradius-api-go-template",
 		Git:           g,
-		Python:        py,
 		Go:            gо,
 		FS:            fs,
 	}
@@ -29,7 +24,7 @@ func bootstrapGo() (*FreeRADIUSAPIBootstrap, *system.MockGit, *system.MockPython
 	for _, skrip := range skripPemeliharaan {
 		fs.PresetExists[b.GoTemplateDir+"/"+skrip] = true
 	}
-	return b, g, py, gо, fs
+	return b, g, gо, fs
 }
 
 func paramsUji() SetupInstanceParams {
@@ -47,51 +42,16 @@ func paramsUji() SetupInstanceParams {
 	}
 }
 
-// Jalur PYTHON masih utuh dan bisa dipilih.
-//
-// PERHATIAN soal nama: ini BUKAN menguji bawaan. Bawaan runtime datang dari
-// config (RM_API_RUNTIME, kini "go" — lihat config.TestAPIRuntime_BawaanGo);
-// yang diuji di sini adalah bahwa field Runtime yang kosong atau bernilai
-// "python" tetap menempuh jalur Python utuh: venv dibuat, pip dipanggil, .env
-// bentuk Python. Itu jalan keluar kalau runtime Go bermasalah di satu mesin,
-// dan ia harus tetap bekerja meski bawaannya sudah berpindah.
-func TestJalurPythonMasihUtuh(t *testing.T) {
-	for _, nilai := range []string{"", "python", "PYTHON", "  python  "} {
-		b, _, py, gо, fs := bootstrapGo()
-		b.Runtime = nilai
-		if b.PakaiGo() {
-			t.Fatalf("Runtime=%q seharusnya BUKAN go", nilai)
-		}
-		if err := b.SetupInstance(context.Background(), paramsUji()); err != nil {
-			t.Fatalf("Runtime=%q: %v", nilai, err)
-		}
-		if len(py.Calls) == 0 {
-			t.Fatalf("Runtime=%q: venv/pip tidak dipanggil — jalur Python tidak dilalui", nilai)
-		}
-		if len(gо.Calls) != 0 {
-			t.Fatalf("Runtime=%q: go build dipanggil padahal runtime python", nilai)
-		}
-		env := string(fs.Files["/root/mitra_x-api/.env"])
-		if !strings.Contains(env, "SWAGGER_USERNAME=admin") {
-			t.Fatalf("Runtime=%q: .env bukan bentuk Python:\n%s", nilai, env)
-		}
-		// Baris PORT= sendiri, bukan substring: DB_PORT=3306 juga memuat "PORT=".
-		for _, baris := range strings.Split(env, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(baris), "PORT=") {
-				t.Fatalf("Runtime=%q: .env Python tidak boleh memuat PORT:\n%s", nilai, env)
-			}
-		}
-	}
-}
-
-// Runtime go: build + salin BINER saja, tanpa venv, tanpa pip.
+// Build + salin BINER saja, tanpa venv, tanpa pip, tanpa pohon sumber.
 func TestRuntimeGo_BinerBukanPohonSumber(t *testing.T) {
-	b, _, py, gо, fs := bootstrapGo()
+	b, _, gо, fs := bootstrapGo()
 	if err := b.SetupInstance(context.Background(), paramsUji()); err != nil {
 		t.Fatal(err)
 	}
-	if len(py.Calls) != 0 {
-		t.Fatalf("venv/pip dipanggil pada runtime go: %v", py.Calls)
+	for k := range fs.Files {
+		if strings.Contains(k, "/venv") {
+			t.Fatalf("ada berkas venv tertulis: %s", k)
+		}
 	}
 	binTemplate := "/var/lib/radius-manager-api/freeradius-api-go-template/api/freeradius-api"
 	if gо.Built[binTemplate] == "" {
@@ -112,7 +72,7 @@ func TestRuntimeGo_BinerBukanPohonSumber(t *testing.T) {
 // Tanpa PORT, semua instance mencoba bind 8000 dan yang kedua gagal.
 // Tanpa BASIC_AUTH_*, aplikasi membalas 401 untuk SETIAP panggilan ERP.
 func TestRuntimeGo_EnvMemuatPortDanBasicAuth(t *testing.T) {
-	b, _, _, _, fs := bootstrapGo()
+	b, _, _, fs := bootstrapGo()
 	if err := b.SetupInstance(context.Background(), paramsUji()); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +97,7 @@ func TestRuntimeGo_EnvMemuatPortDanBasicAuth(t *testing.T) {
 
 // APIPort wajib: kalau lupa diteruskan, JANGAN diam-diam jatuh ke 8000.
 func TestRuntimeGo_APIPortWajib(t *testing.T) {
-	b, _, _, _, _ := bootstrapGo()
+	b, _, _, _ := bootstrapGo()
 	p := paramsUji()
 	p.APIPort = 0
 	err := b.SetupInstance(context.Background(), p)
@@ -149,12 +109,13 @@ func TestRuntimeGo_APIPortWajib(t *testing.T) {
 	}
 }
 
-// PENJAGA TERPENTING: jangan pernah mengubah instance PYTHON yang sudah
-// berjalan menjadi Go secara implisit. Unit lamanya menunjuk venv/bin/uvicorn
+// PENJAGA TERPENTING (tetap berlaku meski runtime Python sudah dibuang):
+// jangan pernah mengubah instance PYTHON LAMA yang masih berjalan di VM menjadi
+// Go secara implisit. Unit lamanya menunjuk venv/bin/uvicorn
 // dan tidak ditulis ulang oleh jalur mana pun, jadi menimpa .env-nya akan
 // mematikan instance yang sedang melayani pelanggan tanpa ada yang memperbaikinya.
 func TestRuntimeGo_MenolakMengubahInstancePython(t *testing.T) {
-	b, _, _, gо, fs := bootstrapGo()
+	b, _, gо, fs := bootstrapGo()
 	fs.PresetExists["/root/mitra_x-api"] = true
 	fs.PresetExists["/root/mitra_x-api/venv"] = true
 
@@ -173,10 +134,10 @@ func TestRuntimeGo_MenolakMengubahInstancePython(t *testing.T) {
 	}
 }
 
-// runtime=go tanpa RM_API_GO_REPO harus gagal KERAS, bukan jatuh ke repo Python:
-// memasang aplikasi yang berbeda dari yang diminta lebih buruk daripada gagal.
+// Tanpa RM_API_GO_REPO harus gagal KERAS dengan pesan yang menyebut
+// variabelnya, dan git tidak boleh dipanggil sama sekali.
 func TestRuntimeGo_TanpaRepoGagalKeras(t *testing.T) {
-	b, g, _, _, _ := bootstrapGo()
+	b, g, _, _ := bootstrapGo()
 	b.GoRepoURL = ""
 	err := b.EnsureTemplate(context.Background())
 	if err == nil {
@@ -194,7 +155,7 @@ func TestRuntimeGo_TanpaRepoGagalKeras(t *testing.T) {
 // dipaku TIDAK boleh di-pull — kalau di-pull, "versi terpasang" jadi
 // pertanyaan terbuka lagi, padahal itu justru yang dipaku.
 func TestRuntimeGo_RefDipakuDanTidakDiPull(t *testing.T) {
-	b, g, _, _, fs := bootstrapGo()
+	b, g, _, fs := bootstrapGo()
 	b.GoRef = "v0.3.0"
 
 	if err := b.EnsureTemplate(context.Background()); err != nil {
@@ -215,22 +176,6 @@ func TestRuntimeGo_RefDipakuDanTidakDiPull(t *testing.T) {
 		if c.Method == "Pull" {
 			t.Fatal("template yang dipaku di-Pull — versinya jadi tak tentu lagi")
 		}
-	}
-}
-
-// Template Python dan Go harus DIPISAH: repo berbeda, jadi satu direktori
-// berarti yang satu menimpa checkout yang lain.
-func TestTemplateDirTerpisahPerRuntime(t *testing.T) {
-	b, _, _, _, _ := bootstrapGo()
-	if b.templateDir() != b.GoTemplateDir {
-		t.Fatalf("runtime go memakai template Python: %s", b.templateDir())
-	}
-	b.Runtime = RuntimePython
-	if b.templateDir() != b.TemplateDir {
-		t.Fatalf("runtime python memakai template Go: %s", b.templateDir())
-	}
-	if b.TemplateDir == b.GoTemplateDir {
-		t.Fatal("kedua template menunjuk direktori yang SAMA")
 	}
 }
 
@@ -266,28 +211,13 @@ func TestUnitSystemdGo(t *testing.T) {
 	}
 }
 
-// Unit Python TIDAK BOLEH berubah: itu yang dipakai instance yang sudah jalan.
-func TestUnitSystemdPythonTidakBerubah(t *testing.T) {
-	i := &impl{}
-	unit := i.renderAPIServiceUnit("mitra_x", "/root/mitra_x-api", 20100)
-	for _, wajib := range []string{
-		"ExecStart=/root/mitra_x-api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 20100 --workers 4",
-		"WorkingDirectory=/root/mitra_x-api",
-		"SyslogIdentifier=mitra_x-api",
-	} {
-		if !strings.Contains(unit, wajib) {
-			t.Fatalf("unit Python berubah — instance yang sudah jalan memakai bentuk ini.\nhilang: %q\n%s", wajib, unit)
-		}
-	}
-}
-
 // Skrip pemeliharaan absen di template → create GAGAL, dan tidak ada .env yang
 // tertulis. Ini penjaga terhadap kegagalan yang paling mahal di jalur ini:
 // instance yang jalan tanpa backup basis data, gagal senyap di timer, dan baru
 // diketahui pada saat backup-nya dibutuhkan.
 func TestRuntimeGo_SkripPemeliharaanWajibAdaDiTemplate(t *testing.T) {
 	for _, hilang := range skripPemeliharaan {
-		b, _, _, _, fs := bootstrapGo()
+		b, _, _, fs := bootstrapGo()
 		delete(fs.PresetExists, b.GoTemplateDir+"/"+hilang)
 
 		err := b.SetupInstance(context.Background(), paramsUji())
@@ -309,7 +239,7 @@ func TestRuntimeGo_SkripPemeliharaanWajibAdaDiTemplate(t *testing.T) {
 // Dan saat ada, keduanya harus BENAR-BENAR mendarat di direktori instance:
 // timer menunjuk ke sana, dan PatchScripts menambal kredensialnya di tempat.
 func TestRuntimeGo_SkripPemeliharaanDisalinKeInstance(t *testing.T) {
-	b, _, _, _, fs := bootstrapGo()
+	b, _, _, fs := bootstrapGo()
 	if err := b.SetupInstance(context.Background(), paramsUji()); err != nil {
 		t.Fatal(err)
 	}

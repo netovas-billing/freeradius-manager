@@ -94,14 +94,3 @@ type GoToolchain interface {
 	// Build menjalankan `go build -mod=vendor -o outBin .` di dalam pkgDir.
 	Build(ctx context.Context, pkgDir, outBin string) error
 }
-
-// Python wraps Python tooling needed to set up the per-instance
-// freeradius-api process: virtualenv creation and pip install.
-type Python interface {
-	// CreateVenv creates a virtualenv at venvDir. Idempotent: skips
-	// if venvDir already contains a python interpreter.
-	CreateVenv(ctx context.Context, venvDir string) error
-
-	// PipInstall runs `<venvDir>/bin/pip install -r <requirementsFile>`.
-	PipInstall(ctx context.Context, venvDir, requirementsFile string) error
-}

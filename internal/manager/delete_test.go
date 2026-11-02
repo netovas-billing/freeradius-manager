@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -154,6 +155,100 @@ func TestDeleteInstance_InvalidName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid") {
 		t.Errorf("expected invalid_name error, got %v", err)
+	}
+}
+
+// Delete ikut menghapus <APIDirBase>/<nama>-api — selaras dengan bash delete.
+// Kasus yang paling penting: instance Python LAMA (ada venv/). Dulu
+// direktorinya tertinggal, dan create ulang dengan nama yang sama ditolak
+// permanen oleh penjaga venv di setupInstanceGo.
+func TestDeleteInstance_MenghapusDirektoriAPI(t *testing.T) {
+	i, _, _, fs, mock, cleanup := newCreateTestImpl(t)
+	defer cleanup()
+	expectCreateDB(mock)
+	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	apiDir := filepath.Join(i.cfg.APIDirBase, "mitra_x-api")
+	// Tiru sisa instance Python lama di direktori yang sama (direktori itu
+	// sendiri + venv/ di dalamnya — keduanya yang dilihat penjaga venv).
+	fs.Dirs[apiDir] = "instance-lama"
+	fs.Dirs[apiDir+"/venv"] = "python3 -m venv"
+	fs.Files[apiDir+"/main.py"] = []byte("app = FastAPI()")
+
+	if _, err := i.DeleteInstance(context.Background(), "mitra_x", false); err != nil {
+		t.Fatalf("DeleteInstance: %v", err)
+	}
+	if !hasMethodArg(fs.Calls, "RemoveDir", apiDir) {
+		t.Fatalf("RemoveDir %s tidak dipanggil; calls=%v", apiDir, fs.Calls)
+	}
+	for f := range fs.Files {
+		if strings.HasPrefix(f, apiDir+"/") {
+			t.Errorf("berkas tertinggal di direktori API: %s", f)
+		}
+	}
+	if _, ada := fs.Dirs[apiDir+"/venv"]; ada {
+		t.Error("venv/ tertinggal — create ulang nama yang sama akan ditolak penjaga venv")
+	}
+
+	// Dan create ulang dengan NAMA YANG SAMA sekarang lolos penjaga venv.
+	expectCreateDB(mock)
+	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err != nil {
+		t.Fatalf("create ulang sesudah delete ditolak: %v", err)
+	}
+}
+
+// Penjaga path: rm -rf TIDAK PERNAH boleh mendarat di luar APIDirBase, apa pun
+// isi APIDirBase atau namanya.
+func TestDirektoriAPIAman(t *testing.T) {
+	cases := []struct {
+		base, name string
+		want       string // "" = harus ditolak
+	}{
+		{"/root", "mitra_x", "/root/mitra_x-api"},
+		{"/root/", "mitra_x", "/root/mitra_x-api"},
+		{"/srv/api/../api", "mitra_x", "/srv/api/mitra_x-api"},
+		{"/", "mitra_x", ""},           // rm -rf /mitra_x-api di akar: tolak
+		{"relatif/dir", "mitra_x", ""}, // tergantung cwd: tolak
+		{"/root", "", ""},              // "/root/-api"
+		{"/root", "../etc", ""},        // keluar dari base
+		{"/root", "a/b", ""},           // subdir
+		{"/root", "default", ""},       // nama cadangan
+		{"/root", "MITRA", ""},         // gagal validateName
+	}
+	for _, c := range cases {
+		i := &impl{cfg: Config{APIDirBase: c.base}}
+		got, err := i.direktoriAPIAman(c.name)
+		if c.want == "" {
+			if err == nil {
+				t.Errorf("base=%q name=%q diterima (%q) — seharusnya ditolak", c.base, c.name, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("base=%q name=%q: got %q, %v; want %q", c.base, c.name, got, err, c.want)
+		}
+	}
+}
+
+// Kalau APIDirBase tidak aman, delete TIDAK memanggil RemoveDir sama sekali,
+// tapi langkah lain (unit, config, port, state) tetap berjalan.
+func TestDeleteInstance_APIDirBaseTidakAman_TidakMenghapus(t *testing.T) {
+	i, sysctl, _, fs, mock, cleanup := newCreateTestImpl(t)
+	defer cleanup()
+	expectCreateDB(mock)
+	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	i.cfg.APIDirBase = "/"
+	if _, err := i.DeleteInstance(context.Background(), "mitra_x", false); err != nil {
+		t.Fatalf("DeleteInstance: %v", err)
+	}
+	if hasMethod(fs.Calls, "RemoveDir") {
+		t.Fatalf("RemoveDir dipanggil padahal APIDirBase=/: %v", fs.Calls)
+	}
+	if !hasMethodArg(sysctl.Calls, "RemoveUnit", "mitra_x-api.service") {
+		t.Error("langkah lain delete ikut berhenti")
 	}
 }
 

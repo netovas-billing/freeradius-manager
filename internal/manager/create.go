@@ -28,6 +28,15 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 		return nil, fmt.Errorf("%w: %s", ErrInstanceExists, req.Name)
 	}
 
+	// Tanpa bootstrap TIDAK ADA yang memasang aplikasi di direktori instance.
+	// Dulu jalur ini tetap menulis unit uvicorn yang menunjuk venv yang tak
+	// pernah dibuat, Start systemd tidak menunggu proses sehat, dan create
+	// melapor SUKSES untuk instance yang API-nya mati. Ditolak di sini, SEBELUM
+	// port/DB/config FreeRADIUS disentuh, supaya tak ada sisa setengah jadi.
+	if i.cfg.APIBootstrap == nil {
+		return nil, ErrBootstrapTidakAktif
+	}
+
 	name := req.Name
 	dbName, dbUser := name, name
 
@@ -162,10 +171,9 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 	}
 	apiDir := filepath.Join(i.apiDirBase(), name+"-api")
 
-	// ---- Step 6b: bootstrap freeradius-api (v0.2.0) ----
-	// Skipped if no bootstrap configured (v0.1.x behavior — caller
-	// handled venv/clone out of band).
-	if i.cfg.APIBootstrap != nil {
+	// ---- Step 6b: bootstrap freeradius-api (runtime Go) ----
+	// APIBootstrap dijamin non-nil oleh penolakan di awal fungsi.
+	{
 		if err := i.cfg.APIBootstrap.EnsureTemplate(ctx); err != nil {
 			return nil, fmt.Errorf("ensure freeradius-api template: %w", err)
 		}
@@ -198,28 +206,23 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 	}
 
 	// ---- Step 6c: install maintenance timers (v0.3.0) ----
-	// Skipped when Maintenance or APIBootstrap is nil (the scripts only
-	// exist on disk after bootstrap, so a timer pointing at them would
-	// fire and ENOENT). Removal happens in DeleteInstance.
-	if i.cfg.Maintenance != nil && i.cfg.APIBootstrap != nil {
-		// GAGAL-KERAS untuk runtime Go selama skripnya belum ada.
+	// Skipped when Maintenance is nil. Removal happens in DeleteInstance.
+	if i.cfg.Maintenance != nil {
+		// GAGAL-KERAS bila skripnya tidak ada di direktori instance.
 		//
 		// Timer pemeliharaan menunjuk autoclearzombie.sh dan autobackups3.sh DI
-		// DALAM direktori instance. Kedua skrip itu milik repo PYTHON; repo Go
-		// belum membawanya. Kalau dibiarkan, timernya terpasang lalu ENOENT tiap
-		// kali berjalan — artinya instance itu jalan TANPA pembersih sesi zombie
-		// dan TANPA backup basis data, dan kegagalannya hanya terlihat oleh yang
-		// membaca log timer. Kehilangan backup yang tak disadari jauh lebih mahal
-		// daripada create yang gagal dengan pesan jelas.
-		if i.cfg.APIBootstrap.PakaiGo() {
-			for _, skrip := range []string{"autoclearzombie.sh", "autobackups3.sh"} {
-				ada, _ := i.cfg.FS.Exists(ctx, filepath.Join(apiDir, skrip))
-				if !ada {
-					return nil, fmt.Errorf("runtime go: %s tidak ada di %s — "+
-						"timer pemeliharaan akan ENOENT dan instance ini akan jalan tanpa "+
-						"backup basis data; pindahkan skrip pemeliharaan ke repo Go dulu, "+
-						"atau jalankan tanpa Maintenance", skrip, apiDir)
-				}
+		// DALAM direktori instance. setupInstanceGo sudah menolak template yang
+		// tak membawanya; pemeriksaan ini lapis kedua tepat sebelum timer
+		// dipasang. Kalau dibiarkan, timernya ENOENT tiap kali berjalan — instance
+		// jalan TANPA pembersih sesi zombie dan TANPA backup basis data, dan
+		// kegagalannya hanya terlihat oleh yang membaca log timer.
+		for _, skrip := range skripPemeliharaan {
+			ada, _ := i.cfg.FS.Exists(ctx, filepath.Join(apiDir, skrip))
+			if !ada {
+				return nil, fmt.Errorf("%s tidak ada di %s — "+
+					"timer pemeliharaan akan ENOENT dan instance ini akan jalan tanpa "+
+					"backup basis data; pastikan template freeradius-api membawanya, "+
+					"atau jalankan tanpa Maintenance", skrip, apiDir)
 			}
 		}
 		if err := i.cfg.Maintenance.SetupForInstance(ctx, name, MaintenanceCreds{
@@ -238,10 +241,9 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 
 	// ---- Step 7: write systemd unit + start ----
 	unitName := name + "-api.service"
-	unitContent := i.renderAPIServiceUnit(name, apiDir, apiPort)
-	if i.cfg.APIBootstrap != nil && i.cfg.APIBootstrap.PakaiGo() {
-		unitContent = i.renderAPIServiceUnitGo(name, apiDir)
-	}
+	// SELALU unit Go: runtime Python sudah dibuang, dan instance Python lama
+	// tidak pernah lewat sini (unitnya sudah ada; create ditolak lebih awal).
+	unitContent := i.renderAPIServiceUnitGo(name, apiDir)
 	if err := i.cfg.Systemctl.WriteUnit(ctx, unitName, unitContent); err != nil {
 		return nil, fmt.Errorf("write unit %s: %w", unitName, err)
 	}
@@ -357,36 +359,14 @@ func (i *impl) frPaths(kind, modName string) (string, string) {
 	return filepath.Join(root, modName), filepath.Join(root, modName)
 }
 
-// renderAPIServiceUnit produces the systemd unit for the per-instance
-// freeradius-api process. The unit references the API directory which
-// is expected to be bootstrapped by a separate provisioning step
-// (template-once + copy strategy per RM-Q answer).
-func (i *impl) renderAPIServiceUnit(name, apiDir string, apiPort int) string {
-	return fmt.Sprintf(`[Unit]
-Description=RadiusAPI with Uvicorn - %s
-After=network.target
-
-[Service]
-User=root
-Group=root
-WorkingDirectory=%s
-ExecStart=%s/venv/bin/uvicorn main:app --host 0.0.0.0 --port %d --workers 4
-Restart=always
-RestartSec=5
-SyslogIdentifier=%s-api
-
-[Install]
-WantedBy=multi-user.target
-`, name, apiDir, apiDir, apiPort, name)
-}
-
 // renderAPIServiceUnitGo — unit systemd untuk instance dengan runtime Go.
 //
-// Yang DISENGAJA SAMA dengan unit uvicorn, dan jangan diubah: nama unit
-// (<nama>-api.service, dirakit pemanggil) dan WorkingDirectory. Nama unit sama
-// berarti start/stop/restart/delete, health check, dan aturan dst-nat di
-// concentrator tidak perlu tahu runtime mana yang dipakai — satu hal yang
-// membuat perpindahan ini bisa dibatalkan per instance.
+// Yang DISENGAJA SAMA dengan unit uvicorn instance Python LAMA, dan jangan
+// diubah: nama unit (<nama>-api.service, dirakit pemanggil) dan
+// WorkingDirectory. Nama unit sama berarti start/stop/restart/delete, health
+// check, dan aturan dst-nat di concentrator tidak perlu tahu runtime mana yang
+// melayani instance — instance Python lama yang masih berjalan tetap dikelola
+// lewat jalur yang sama.
 //
 // Port TIDAK ada di baris perintah: ia dibaca dari PORT di .env, yang dimuat
 // aplikasi dari WorkingDirectory (godotenv membaca ./.env). Menaruhnya di dua

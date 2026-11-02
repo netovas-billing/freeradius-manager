@@ -1,6 +1,6 @@
 [Unit]
 Description=Radius Manager API (Control Plane for FreeRADIUS instances)
-Documentation=https://github.com/heirro/freeradius-manager/blob/master/docs/SRS-RadiusManagerAPI.md
+Documentation=https://github.com/netovas-billing/freeradius-manager/blob/master/docs/SRS-RadiusManagerAPI.md
 After=network-online.target mariadb.service freeradius.service
 Wants=network-online.target
 

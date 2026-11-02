@@ -28,7 +28,7 @@ Working end-to-end (with a properly provisioned Linux + MariaDB + FreeRADIUS hos
 - `POST /v1/instances/{name}/test` — probes UDP RADIUS ports via `net.ListenPacket` and the API port via `net.Dial`
 
 Deferred to v0.2.0:
-- freeradius-api repo bootstrap per instance (`git clone` + `python -m venv` + `pip install`). Currently Phase 2 writes the `<name>-api.service` systemd unit but expects the API directory to be pre-provisioned (manually or via the existing bash `radius-manager.sh create`).
+- freeradius-api bootstrap per instance — now implemented (runtime Go: template clone once, `go build`, copy binary + maintenance scripts + `.env`). The Python runtime (venv + pip + uvicorn) was removed on 30 Oct 2026; create is refused when the bootstrap is not configured.
 - `autoclearzombie.sh` + `autobackups3.sh` cron job management — kept on the bash side via `update.sh`; RM-API intentionally does not touch crontab (SRS RM-Q03).
 
 Cannot be validated from a macOS dev box (see SRS §17 RM-V01..RM-V06):

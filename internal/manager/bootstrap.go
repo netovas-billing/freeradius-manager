@@ -36,49 +36,35 @@ func (s S3Config) IsZero() bool {
 	return s.Remote == "" || s.Bucket == ""
 }
 
-// FreeRADIUSAPIBootstrap encapsulates the template-once + copy-per-instance
-// strategy for the freeradius-api repo (per RM-Q answer: option B).
+// FreeRADIUSAPIBootstrap memasang freeradius-api (runtime Go) per instance
+// dengan strategi template-sekali + salin-per-instance (RM-Q opsi B):
 //
-//   - On first call to EnsureTemplate, the repo is git-cloned to TemplateDir.
-//   - Subsequent calls only Pull (or no-op if SkipPull=true).
-//   - SetupInstance copies TemplateDir → APIDir, creates a Python venv,
-//     pip-installs requirements, and writes a `.env` file.
+//   - EnsureTemplate meng-clone repo Go ke GoTemplateDir sekali, lalu hanya
+//     Pull (atau tidak sama sekali bila SkipPull / ref dipaku).
+//   - SetupInstance membangun biner di template, menyalin biner + skrip
+//     pemeliharaan ke APIDir, dan menulis `.env`.
 //
-// The whole operation is mockable via the system.Git, system.Python, and
-// system.Filesystem interfaces — production deploy uses RealGit/RealPython,
-// unit tests use MockGit/MockPython.
+// Runtime Python (clone repo Python, venv, pip, unit uvicorn) sudah DIBUANG
+// (pemilik, 30 Okt 2026). Instance Python LAMA yang masih berjalan tidak
+// disentuh jalur ini — penjaga venv/ di setupInstanceGo menolak menimpanya.
+//
+// Semua operasi bisa di-mock lewat system.Git, system.GoToolchain, dan
+// system.Filesystem.
 type FreeRADIUSAPIBootstrap struct {
-	RepoURL     string
-	TemplateDir string
-	SkipPull    bool
+	SkipPull bool
 
-	// Runtime memilih aplikasi yang dipasang per instance.
-	//
-	// Kosong atau "python" = PERILAKU HARI INI, tanpa perubahan apa pun:
-	// clone repo Python, venv, pip, unit uvicorn. Itu bawaan yang disengaja —
-	// instance yang sudah berjalan tidak boleh terpengaruh oleh adanya opsi ini.
-	//
-	// "go" = pasang biner dari repo Go. Endpoint dan portnya sama; yang berbeda
-	// hanya proses yang melayaninya.
-	Runtime string
-
-	// Dipakai HANYA saat Runtime=="go".
 	GoRepoURL     string
 	GoRef         string // tag/branch/commit; kosong = branch bawaan (tidak dipaku)
 	GoTemplateDir string
 
-	Git    system.Git
-	Python system.Python
-	Go     system.GoToolchain
-	FS     system.Filesystem
+	Git system.Git
+	Go  system.GoToolchain
+	FS  system.Filesystem
 
 	once sync.Mutex
 }
 
 const (
-	RuntimePython = "python"
-	RuntimeGo     = "go"
-
 	// namaBinerGo — nama biner di direktori instance. Unit systemd menunjuk
 	// nama ini, jadi mengubahnya memutus instance yang sudah ada.
 	namaBinerGo = "freeradius-api"
@@ -90,46 +76,26 @@ const (
 // skripPemeliharaan — skrip yang HARUS ikut mendarat di direktori instance.
 //
 // Timer pemeliharaan menunjuk keduanya DI DALAM direktori instance, dan
-// PatchScripts menambal kredensialnya di tempat. Pada jalur Python keduanya ikut
-// lewat CopyDir seluruh pohon; pada jalur Go hanya biner yang disalin, jadi
-// keduanya harus disebut eksplisit — kalau tidak, timernya ENOENT dan instance
-// jalan tanpa pembersih zombie dan tanpa backup basis data.
+// PatchScripts menambal kredensialnya di tempat. Hanya biner yang disalin dari
+// template, jadi keduanya harus disebut eksplisit — kalau tidak, timernya
+// ENOENT dan instance jalan tanpa pembersih zombie dan tanpa backup basis data.
 var skripPemeliharaan = []string{"autoclearzombie.sh", "autobackups3.sh"}
 
-// PakaiGo melaporkan apakah instance dipasang dengan runtime Go.
-func (b *FreeRADIUSAPIBootstrap) PakaiGo() bool {
-	return strings.EqualFold(strings.TrimSpace(b.Runtime), RuntimeGo)
-}
-
-// templateDir mengembalikan direktori template untuk runtime yang aktif.
-// Keduanya DIPISAH: repo-nya berbeda, jadi satu direktori berarti runtime yang
-// satu menimpa checkout runtime yang lain.
-func (b *FreeRADIUSAPIBootstrap) templateDir() string {
-	if b.PakaiGo() {
-		return b.GoTemplateDir
-	}
-	return b.TemplateDir
-}
-
-// EnsureTemplate guarantees that TemplateDir exists and is up to date.
-// Safe to call concurrently.
+// EnsureTemplate memastikan GoTemplateDir ada dan mutakhir.
+// Aman dipanggil bersamaan.
 func (b *FreeRADIUSAPIBootstrap) EnsureTemplate(ctx context.Context) error {
 	b.once.Lock()
 	defer b.once.Unlock()
 
-	dir := b.templateDir()
-	if dir == "" {
-		return fmt.Errorf("template dir kosong untuk runtime %q", b.Runtime)
+	dir := b.GoTemplateDir
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("RM_API_GO_TEMPLATE_DIR kosong")
 	}
-	repo := b.RepoURL
-	if b.PakaiGo() {
-		repo = b.GoRepoURL
-		if strings.TrimSpace(repo) == "" {
-			// Gagal-keras, bukan jatuh ke repo Python: diam-diam memasang
-			// aplikasi yang BERBEDA dari yang diminta operator jauh lebih buruk
-			// daripada create yang gagal dengan pesan jelas.
-			return fmt.Errorf("RM_API_RUNTIME=go tapi RM_API_GO_REPO kosong")
-		}
+	repo := b.GoRepoURL
+	if strings.TrimSpace(repo) == "" {
+		// Gagal-keras dengan pesan yang menyebut variabelnya: create yang gagal
+		// jelas jauh lebih murah daripada instance tanpa aplikasi.
+		return fmt.Errorf("RM_API_GO_REPO kosong — tak ada repo freeradius-api untuk di-clone")
 	}
 
 	exists, err := b.FS.Exists(ctx, dir)
@@ -145,7 +111,7 @@ func (b *FreeRADIUSAPIBootstrap) EnsureTemplate(ctx context.Context) error {
 	if b.SkipPull {
 		return nil
 	}
-	if b.PakaiGo() && strings.TrimSpace(b.GoRef) != "" {
+	if strings.TrimSpace(b.GoRef) != "" {
 		// Checkout yang DIPAKU tidak boleh di-pull: `pull --ff-only` pada HEAD
 		// terlepas bukan sekadar gagal, ia membuat "versi terpasang" jadi
 		// pertanyaan terbuka lagi — padahal justru itu yang dipaku.
@@ -173,10 +139,7 @@ type SetupInstanceParams struct {
 	APIPort int
 }
 
-// SetupInstance bootstraps an api directory by copying the template,
-// creating a Python venv, pip-installing requirements, and writing .env.
-// Returns the swagger username/password actually written (for the caller
-// to record).
+// SetupInstance memasang direktori API satu instance (runtime Go).
 func (b *FreeRADIUSAPIBootstrap) SetupInstance(ctx context.Context, p SetupInstanceParams) error {
 	if err := validateIdentifier(p.InstanceName); err != nil {
 		return err
@@ -189,61 +152,36 @@ func (b *FreeRADIUSAPIBootstrap) SetupInstance(ctx context.Context, p SetupInsta
 	if err != nil {
 		return fmt.Errorf("probe api dir: %w", err)
 	}
-
-	if b.PakaiGo() {
-		return b.setupInstanceGo(ctx, p, exists)
-	}
-
-	if !exists {
-		if err := b.FS.CopyDir(ctx, b.TemplateDir, p.APIDir); err != nil {
-			return fmt.Errorf("copy template: %w", err)
-		}
-	}
-
-	venvDir := filepath.Join(p.APIDir, "venv")
-	if err := b.Python.CreateVenv(ctx, venvDir); err != nil {
-		return err
-	}
-	requirementsFile := filepath.Join(p.APIDir, "requirements.txt")
-	reqExists, _ := b.FS.Exists(ctx, requirementsFile)
-	if reqExists {
-		if err := b.Python.PipInstall(ctx, venvDir, requirementsFile); err != nil {
-			return err
-		}
-	}
-
-	envContent := renderAPIEnvFile(p)
-	envPath := filepath.Join(p.APIDir, ".env")
-	if err := b.FS.WriteFile(ctx, envPath, []byte(envContent), 0o600); err != nil {
-		return err
-	}
-	return nil
+	return b.setupInstanceGo(ctx, p, exists)
 }
 
 // setupInstanceGo memasang instance dengan runtime Go.
 //
-// Bedanya dari jalur Python bukan cuma bahasanya: yang mendarat di direktori
-// instance hanya BINER dan `.env`, bukan seluruh pohon sumber. Menyalin
-// sumbernya per instance berarti ~34 MB vendor dikali jumlah instance (maksimum
-// 43 per VM) tanpa satu pun manfaat — binernya statis dan sama untuk semuanya.
+// Yang mendarat di direktori instance hanya BINER, skrip pemeliharaan, dan
+// `.env`, bukan seluruh pohon sumber. Menyalin sumbernya per instance berarti
+// ~34 MB vendor dikali jumlah instance (maksimum 43 per VM) tanpa satu pun
+// manfaat — binernya statis dan sama untuk semuanya.
 func (b *FreeRADIUSAPIBootstrap) setupInstanceGo(ctx context.Context, p SetupInstanceParams, apiDirAda bool) error {
 	if b.Go == nil {
-		return fmt.Errorf("runtime go dipilih tapi toolchain Go tidak di-wire")
+		return fmt.Errorf("toolchain Go tidak di-wire")
 	}
 	if strings.TrimSpace(b.GoTemplateDir) == "" {
-		return fmt.Errorf("runtime go dipilih tapi GoTemplateDir kosong")
+		return fmt.Errorf("GoTemplateDir kosong")
 	}
 
-	// PENJAGA: jangan pernah mengubah instance Python yang sudah ada menjadi Go
-	// secara implisit. Kalau direktorinya memuat venv/, ia dilayani unit uvicorn
-	// yang menunjuk venv/bin/uvicorn; menimpa .env dengan bentuk Go akan
-	// mematikan instance yang sedang melayani pelanggan, dan unit lamanya tidak
-	// ikut ditulis ulang oleh jalur mana pun sehingga tak ada yang memperbaikinya.
+	// PENJAGA: jangan pernah mengubah instance PYTHON lama menjadi Go secara
+	// implisit. Runtime Python memang sudah dibuang, tapi instance Python yang
+	// dibuat sebelumnya MASIH berjalan di VM: direktorinya memuat venv/ dan
+	// dilayani unit yang menunjuk venv/bin/uvicorn. Menimpa .env dengan bentuk Go
+	// akan mematikan instance yang sedang melayani pelanggan, dan unit lamanya
+	// tidak ikut ditulis ulang oleh jalur mana pun sehingga tak ada yang
+	// memperbaikinya.
 	if apiDirAda {
 		venvAda, _ := b.FS.Exists(ctx, filepath.Join(p.APIDir, "venv"))
 		if venvAda {
-			return fmt.Errorf("direktori %s adalah instance PYTHON yang sudah ada (ada venv/) — "+
-				"menolak mengubahnya ke runtime go; hapus instance itu dulu atau pakai nama lain", p.APIDir)
+			return fmt.Errorf("direktori %s adalah instance PYTHON lama (ada venv/) — "+
+				"menolak menimpanya dengan runtime go; hapus dulu lewat DELETE instance "+
+				"(atau `radius-manager.sh delete`), atau pakai nama lain", p.APIDir)
 		}
 	}
 
@@ -293,9 +231,8 @@ func (b *FreeRADIUSAPIBootstrap) setupInstanceGo(ctx context.Context, p SetupIns
 // Bawaan aplikasinya 120 permintaan/60 detik dengan SATU ember untuk seluruh
 // backend (kuncinya nama kredensial, bukan IP). Backend menyusuri daftar
 // FreeRADIUS 1.000 baris per permintaan dengan batas 200 halaman, jadi satu
-// penyapuan tabel besar saja sudah bisa melewati 120 dalam satu menit — dan
-// aplikasi Python tidak punya pembatas sama sekali, sehingga membiarkan bawaan
-// itu berarti MEMPERKENALKAN mode gagal baru saat berpindah runtime.
+// penyapuan tabel besar saja sudah bisa melewati 120 dalam satu menit, dan
+// tiap 429 berarti sinkronisasi ERP yang terputus di tengah jalan.
 //
 // API ini privat per mitra dan hanya dijangkau backend lewat dst-nat, jadi
 // pembatas di sini bukan lapisan keamanan; ia hanya penahan loop liar.
@@ -485,30 +422,4 @@ func indexByte(b []byte, c byte) int {
 		}
 	}
 	return -1
-}
-
-// renderAPIEnvFile produces a .env that matches what bash setup_api()
-// generates verbatim. Format must remain in sync with freeradius-api's
-// expectations (see config loader in that repo).
-func renderAPIEnvFile(p SetupInstanceParams) string {
-	swUser := p.SwaggerUser
-	if swUser == "" {
-		swUser = "admin"
-	}
-	return fmt.Sprintf(`# Application Settings
-APP_NAME=%s-api
-APP_DEBUG=False
-
-# Swagger/BASIC Auth Credentials
-SWAGGER_USERNAME=%s
-SWAGGER_PASSWORD=%s
-
-# Database Settings
-DB_TYPE=mariadb
-DB_HOST=%s
-DB_PORT=%d
-DB_NAME=%s
-DB_USER=%s
-DB_PASSWORD=%s
-`, p.InstanceName, swUser, p.SwaggerPass, p.DBHost, p.DBPort, p.DBName, p.DBUser, p.DBPass)
 }

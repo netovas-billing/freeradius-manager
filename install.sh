@@ -132,37 +132,42 @@ esac
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a   # silence needrestart kernel/service prompts on Ubuntu 22.04+
 
+# RM_API_RUNTIME selain kosong/"go" membuat radius-manager-api GAGAL BOOT sejak
+# runtime Python dibuang. Diperiksa di sini, SEBELUM biner lama ditimpa dan
+# service di-restart — kalau tidak, install "berhasil" lalu control plane mati
+# di restart terakhir dan mesin tak bisa membuat/menghapus instance sama sekali.
+if [[ -f "$ENV_FILE" ]]; then
+    # Awalan `export ` ikut dikenali, sama seperti load_rm_api_env di
+    # radius-manager.sh yang membaca berkas yang sama.
+    runtime_lama="$(grep -E '^[[:space:]]*(export[[:space:]]+)?RM_API_RUNTIME=' "$ENV_FILE" 2>/dev/null | tail -n1 \
+        | cut -d= -f2- | tr -d "\"'[:space:]" | tr '[:upper:]' '[:lower:]')"
+    case "$runtime_lama" in
+        ""|go) ;;
+        *) fail "$ENV_FILE memuat RM_API_RUNTIME=${runtime_lama}: runtime Python sudah dibuang dan radius-manager-api akan GAGAL BOOT. Hapus baris RM_API_RUNTIME itu (atau isi \"go\") lalu jalankan ulang installer. Instance Python lama yang sudah berjalan tidak terpengaruh." ;;
+    esac
+fi
+
 # -- Phase 2: apt deps --------------------------------------------------------
 phase "apt dependencies"
 # ssl-cert pulls /etc/ssl/certs/ssl-cert-snakeoil.pem (freeradius eap needs it).
 #
-# KENAPA MASIH ADA PYTHON padahal runtime API sudah Go.
-# Tiga alasan berbeda, dan hanya dua yang nyata:
+# KENAPA MASIH ADA python3 padahal runtime Python sudah DIBUANG (30 Okt 2026).
 #
-#   python3      — DIBUTUHKAN, tapi bukan oleh API. Instance yang SUDAH berjalan
-#                  dengan Python punya ExecStart=<dir>/venv/bin/uvicorn, dan venv
-#                  yang dibuat `python3 -m venv` menaut-simbolkan interpreternya
-#                  ke python3 SISTEM. Tanpa itu unit-unit lama mati. (Di Debian
-#                  python3 praktis selalu ada sebagai dependensi basis, jadi ini
-#                  ikat-pinggang-dan-bretel, bukan penopang utama.)
+#   python3 — DIBUTUHKAN, tapi bukan oleh API baru. Instance Python LAMA yang
+#             masih berjalan punya ExecStart=<dir>/venv/bin/uvicorn, dan venv
+#             yang dibuat `python3 -m venv` menaut-simbolkan interpreternya ke
+#             python3 SISTEM. Tanpa itu unit-unit lama mati. (Di Debian python3
+#             praktis selalu ada sebagai dependensi basis, jadi ini
+#             ikat-pinggang-dan-bretel, bukan penopang utama.)
 #
-#   python3-venv — jalan keluar. Ia hanya dipakai untuk MEMBUAT instance Python
-#   python3-pip    baru, dan bawaan runtime sudah "go" di kedua jalur
-#                  (internal/config.Load dan radius-manager.sh), jadi jalur itu
-#                  tak pernah tersentuh dalam operasi normal: SetupInstance
-#                  keluar lebih awal di `if b.PakaiGo()` SEBELUM CreateVenv.
-#                  Tetap dipasang karena RM_API_RUNTIME=python masih didukung
-#                  sebagai jalan keluar kalau runtime Go bermasalah di satu
-#                  mesin — dan RM-API TIDAK apt-install apa pun sendiri, jadi
-#                  tanpa paket ini jalan keluar itu gagal tepat saat dibutuhkan.
-#                  (radius-manager.sh memasangnya sendiri secara lazy, jadi
-#                  jalur bash tak bergantung pada baris ini.)
-#
-# Kalau jalan keluar Python dinyatakan mati, dua paket itu boleh dicabut dan
-# python3 boleh tetap tinggal.
+# python3-venv / python3-pip TIDAK dipasang lagi: keduanya hanya dipakai untuk
+# MEMBUAT instance Python baru, dan jalur itu sudah tidak ada — RM_API_RUNTIME
+# selain "go" kini membuat radius-manager-api gagal boot, dan radius-manager.sh
+# menolak API_RUNTIME selain "go". Installer ini TIDAK meng-uninstall apa pun,
+# jadi paket yang sudah terpasang di VM lama tetap tinggal.
 APT_PKGS=(
     mariadb-server freeradius freeradius-mysql freeradius-utils
-    python3 python3-venv python3-pip
+    python3
     git openssl iproute2 curl ca-certificates ssl-cert build-essential
 )
 
@@ -459,7 +464,7 @@ tmp_unit="$(mktemp)"
 cat > "$tmp_unit" <<EOF
 [Unit]
 Description=Radius Manager API (Control Plane for FreeRADIUS instances)
-Documentation=https://github.com/heirro/freeradius-manager/blob/master/docs/SRS-RadiusManagerAPI.md
+Documentation=https://github.com/netovas-billing/freeradius-manager/blob/master/docs/SRS-RadiusManagerAPI.md
 After=network-online.target mariadb.service freeradius.service
 Wants=network-online.target
 
@@ -478,8 +483,6 @@ Environment="RM_API_STATE_DIR=${STATE_DIR}"
 Environment="RM_API_DB_DSN=root@unix(/var/run/mysqld/mysqld.sock)/"
 Environment="RM_API_LOG_FORMAT=json"
 Environment="RM_API_AUDIT_LOG=${LOG_DIR}/audit.log"
-Environment="RM_API_BOOTSTRAP_REPO=https://github.com/heirro/freeradius-api"
-Environment="RM_API_BOOTSTRAP_TEMPLATE_DIR=${STATE_DIR}/freeradius-api-template"
 Environment="RM_API_CAPACITY_MAX=50"
 
 # Setelan PER-HOST dibaca dari berkas ini. Diletakkan SESUDAH Environment=

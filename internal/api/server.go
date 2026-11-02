@@ -142,6 +142,12 @@ func writeError(w http.ResponseWriter, err error, instanceName string) {
 	case errors.Is(err, manager.ErrInvalidName):
 		status = http.StatusBadRequest
 		apiErr.Error = "invalid_input"
+	case errors.Is(err, manager.ErrBootstrapTidakAktif):
+		// Bukan galat klien maupun bug: control plane belum dikonfigurasi
+		// (bootstrap Go tak aktif). 503 memberi tahu pemanggil bahwa create
+		// belum bisa dilayani; pesan aslinya tetap menjelaskan cara memperbaiki.
+		status = http.StatusServiceUnavailable
+		apiErr.Error = "bootstrap_inactive"
 	case errors.Is(err, manager.ErrNotImplemented):
 		status = http.StatusNotImplemented
 		apiErr.Error = "not_implemented"

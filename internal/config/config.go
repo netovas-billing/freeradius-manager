@@ -65,26 +65,20 @@ type Config struct {
 	// main.go memakai field ini untuk memberi WARN beserta nilai mentahnya.
 	APIPortStartRaw string
 
-	// freeradius-api bootstrap (v0.2.0). When BootstrapAPIRepo is non-empty,
-	// CreateInstance runs the template-once + venv flow.
-	BootstrapAPIRepo     string // RM_API_BOOTSTRAP_REPO, e.g. https://github.com/heirro/freeradius-api
-	BootstrapTemplateDir string // RM_API_BOOTSTRAP_TEMPLATE_DIR, e.g. /var/lib/radius-manager-api/freeradius-api-template
-	BootstrapSkipPull    bool   // RM_API_BOOTSTRAP_SKIP_PULL=true to disable git pull on EnsureTemplate
+	BootstrapSkipPull bool // RM_API_BOOTSTRAP_SKIP_PULL=true to disable git pull on EnsureTemplate
 
-	// APIRuntime — aplikasi freeradius-api yang dipasang per instance:
-	// "go" (BAWAAN) atau "python".
+	// Bootstrap freeradius-api — runtime Go, SATU-SATUNYA runtime.
 	//
-	// Bawaannya go karena itu yang diminta: instance BARU pakai Go. Instance yang
-	// SUDAH BERJALAN tidak tersentuh — SetupInstance hanya dipanggil dari jalur
-	// create, tidak ada jalur yang menulis ulang unit systemd instance lama, dan
-	// runtime go MENOLAK direktori yang memuat venv/.
+	// Runtime Python dibuang (pemilik, 30 Okt 2026: "sudah tidak pakai python
+	// lagi"). RM_API_RUNTIME tidak lagi disimpan sebagai field: nilainya hanya
+	// diperiksa di Load — kosong/"go" diterima, selain itu boot GAGAL (lihat
+	// periksaRuntimeAPI). Instance Python LAMA yang sudah berjalan tetap
+	// dikelola (start/stop/delete hanya memakai nama unit), hanya create
+	// instance Python baru yang tidak ada lagi.
 	//
-	// Nilainya sepadan dengan API_RUNTIME di radius-manager.sh: kedua jalur
-	// membuat instance di mesin yang SAMA dan berbagi .port_registry, jadi
-	// bawaan yang berbeda antar-alat adalah kejutan yang mahal.
-	APIRuntime string // RM_API_RUNTIME
-
-	// Dipakai hanya saat APIRuntime="go".
+	// RM_API_BOOTSTRAP_REPO / RM_API_BOOTSTRAP_TEMPLATE_DIR (repo & template
+	// Python) tidak dibaca lagi; baris lama di unit VM yang belum di-install
+	// ulang aman diabaikan.
 	BootstrapGoRepo        string // RM_API_GO_REPO
 	BootstrapGoRef         string // RM_API_GO_REF — tag/branch/commit yang dipaku
 	BootstrapGoTemplateDir string // RM_API_GO_TEMPLATE_DIR
@@ -154,10 +148,7 @@ func Load() (*Config, error) {
 		APIDirBase:             getenv("RM_API_API_DIR_BASE", "/root"),
 		APIPublishIP:           getenv("RM_API_API_PUBLISH_IP", ""),
 		DBDSN:                  os.Getenv("RM_API_DB_DSN"),
-		BootstrapAPIRepo:       os.Getenv("RM_API_BOOTSTRAP_REPO"),
-		BootstrapTemplateDir:   getenv("RM_API_BOOTSTRAP_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-template"),
 		BootstrapSkipPull:      strings.EqualFold(os.Getenv("RM_API_BOOTSTRAP_SKIP_PULL"), "true"),
-		APIRuntime:             getenv("RM_API_RUNTIME", "go"),
 		BootstrapGoRepo:        getenv("RM_API_GO_REPO", "https://github.com/netovas-billing/freeradius-api"),
 		BootstrapGoRef:         os.Getenv("RM_API_GO_REF"),
 		BootstrapGoTemplateDir: getenv("RM_API_GO_TEMPLATE_DIR", "/var/lib/radius-manager-api/freeradius-api-go-template"),
@@ -180,6 +171,9 @@ func Load() (*Config, error) {
 		if n, ok := ParseAPIPortStart(raw); ok {
 			c.APIPortStart = n
 		}
+	}
+	if err := periksaRuntimeAPI(os.Getenv("RM_API_RUNTIME")); err != nil {
+		return nil, err
 	}
 	dbPort := getenv("RM_API_INSTANCE_DB_PORT", "3306")
 	if n, err := strconv.Atoi(dbPort); err == nil && n > 0 {
@@ -206,6 +200,24 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("either RM_API_TOKEN or RM_API_TOKEN_FILE must be set")
 	}
 	return c, nil
+}
+
+// periksaRuntimeAPI menolak RM_API_RUNTIME selain kosong/"go".
+//
+// Kenapa GAGAL BOOT, bukan diabaikan: dulu "python" adalah jalan keluar yang
+// diiklankan. Operator yang masih menyetelnya mengharapkan instance Python;
+// menerimanya diam-diam lalu memasang Go berarti mesin melakukan hal yang
+// BERBEDA dari yang tertulis di berkas env tanpa satu pun tanda. Gagal boot
+// dengan pesan yang menyebut cara memperbaikinya jauh lebih murah.
+func periksaRuntimeAPI(raw string) error {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" || v == "go" {
+		return nil
+	}
+	return fmt.Errorf("RM_API_RUNTIME=%q tidak didukung lagi: runtime Python sudah dibuang dan "+
+		"satu-satunya runtime adalah \"go\" — hapus baris RM_API_RUNTIME dari "+
+		"/etc/radius-manager-api/env (atau isi \"go\") lalu restart radius-manager-api; "+
+		"instance Python lama yang sudah berjalan tidak terpengaruh", raw)
 }
 
 func getenv(key, def string) string {

@@ -41,9 +41,38 @@ func newCreateTestImpl(t *testing.T) (*impl, *system.MockSystemctl, *system.Mock
 		APIDirBase:       filepath.Join(dir, "api"),
 		PortRegistryPath: filepath.Join(dir, ".port_registry"),
 	}
+	// Bootstrap runtime Go WAJIB untuk create (tanpa itu create ditolak), jadi
+	// fixture memasangnya dengan Filesystem yang SAMA dengan alur create —
+	// pemeriksaan skrip pemeliharaan di create membaca hasil salinan bootstrap.
+	cfg.APIBootstrap = &FreeRADIUSAPIBootstrap{
+		GoRepoURL:     "https://github.com/netovas-billing/freeradius-api",
+		GoTemplateDir: filepath.Join(dir, "fr-api-go-template"),
+		Git:           system.NewMockGit(),
+		Go:            system.NewMockGo(),
+		FS:            fs,
+	}
+	for _, skrip := range skripPemeliharaan {
+		fs.PresetExists[filepath.Join(cfg.APIBootstrap.GoTemplateDir, skrip)] = true
+	}
 	i := &impl{cfg: cfg}
 	cleanup := func() { db.Close() }
 	return i, sysctl, fr, fs, mock, cleanup
+}
+
+// expectCreateDB memasang ekspektasi sqlmock untuk create DB + user + skema
+// mitra_x yang berhasil.
+func expectCreateDB(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("USE `mitra_x`").WillReturnError(sqlmock.ErrCancelled)
+	mock.ExpectExec("CREATE DATABASE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
+		WillReturnRows(sqlmock.NewRows([]string{"t"}))
+	mock.ExpectExec("USE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CREATE TABLE radcheck").WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 func TestCreateInstance_HappyPath(t *testing.T) {
@@ -269,34 +298,12 @@ func TestCreateInstance_WithBootstrap_ClonesAndSetsUpAPIDir(t *testing.T) {
 	i, sysctl, _, fs, mock, cleanup := newCreateTestImpl(t)
 	defer cleanup()
 
-	// Wire bootstrap — share Filesystem with create flow so PresetExists
-	// for requirements.txt can be observed by SetupInstance.
-	mockGit := system.NewMockGit()
-	mockPy := system.NewMockPython()
-	bootstrap := &FreeRADIUSAPIBootstrap{
-		RepoURL:     "https://github.com/heirro/freeradius-api",
-		TemplateDir: filepath.Join(t.TempDir(), "fr-api-template"),
-		Git:         mockGit,
-		Python:      mockPy,
-		FS:          fs,
-	}
-	i.cfg.APIBootstrap = bootstrap
-	// Pretend the copy will produce a requirements.txt that pip should pick up.
+	bootstrap := i.cfg.APIBootstrap
+	mockGit := bootstrap.Git.(*system.MockGit)
+	mockGo := bootstrap.Go.(*system.MockGo)
 	apiDir := filepath.Join(i.cfg.APIDirBase, "mitra_x-api")
-	fs.PresetExists[apiDir+"/requirements.txt"] = true
 
-	// Same DB expectations as the happy-path test.
-	mock.ExpectExec("USE `mitra_x`").WillReturnError(sqlmock.ErrCancelled)
-	mock.ExpectExec("CREATE DATABASE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mysql\.user WHERE user='mitra_x' AND host='localhost'`).
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
-	mock.ExpectExec("CREATE USER 'mitra_x'@'localhost'").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,REFERENCES ON `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("SHOW TABLES FROM `mitra_x` LIKE 'radcheck'").
-		WillReturnRows(sqlmock.NewRows([]string{"t"}))
-	mock.ExpectExec("USE `mitra_x`").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("CREATE TABLE radcheck").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectCreateDB(mock)
 
 	resp, err := i.CreateInstance(context.Background(), createReq("mitra_x"))
 	if err != nil {
@@ -314,35 +321,21 @@ func TestCreateInstance_WithBootstrap_ClonesAndSetsUpAPIDir(t *testing.T) {
 		t.Errorf("expected 1 Clone call, got %d", cloneSeen)
 	}
 
-	// CopyDir was called from template into apiDir.
-	if fs.Dirs[apiDir] != bootstrap.TemplateDir {
-		t.Errorf("CopyDir lineage = %q want %q", fs.Dirs[apiDir], bootstrap.TemplateDir)
+	// Biner dibangun di template lalu disalin ke direktori instance.
+	if len(mockGo.Built) != 1 {
+		t.Errorf("expected 1 go build, got %v", mockGo.Built)
+	}
+	if _, ok := fs.Files[apiDir+"/freeradius-api"]; !ok {
+		t.Errorf("biner tidak disalin ke %s; files=%v", apiDir, keys(fs.Files))
 	}
 
-	// venv was created.
-	venvDir := apiDir + "/venv"
-	if !mockPy.Venvs[venvDir] {
-		t.Errorf("venv %q not created", venvDir)
-	}
-
-	// pip install was invoked because requirements.txt existed.
-	pipSeen := false
-	for _, c := range mockPy.Calls {
-		if c.Method == "PipInstall" {
-			pipSeen = true
-		}
-	}
-	if !pipSeen {
-		t.Error("expected PipInstall after CreateInstance with bootstrap")
-	}
-
-	// .env file written and contains the swagger password the response advertises.
+	// .env file written and contains the password the response advertises.
 	envBytes, ok := fs.Files[apiDir+"/.env"]
 	if !ok {
 		t.Fatal(".env not written by bootstrap")
 	}
-	if !strings.Contains(string(envBytes), "SWAGGER_PASSWORD="+resp.Swagger.Password) {
-		t.Errorf(".env should embed swagger password %q\nfile:\n%s",
+	if !strings.Contains(string(envBytes), "BASIC_AUTH_PASSWORD="+resp.Swagger.Password) {
+		t.Errorf(".env should embed password %q\nfile:\n%s",
 			resp.Swagger.Password, envBytes)
 	}
 
@@ -352,21 +345,69 @@ func TestCreateInstance_WithBootstrap_ClonesAndSetsUpAPIDir(t *testing.T) {
 	}
 }
 
+// Unit yang ditulis create TIDAK PERNAH boleh menyebut venv/uvicorn: runtime
+// Python sudah dibuang, dan unit seperti itu menunjuk berkas yang tak pernah
+// dibuat — Start systemd tidak menunggu proses sehat, jadi create melapor
+// sukses untuk instance yang API-nya mati.
+func TestCreateInstance_UnitTakPernahMenyebutVenvAtauUvicorn(t *testing.T) {
+	i, sysctl, _, _, mock, cleanup := newCreateTestImpl(t)
+	defer cleanup()
+	expectCreateDB(mock)
+
+	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	unit, ok := sysctl.UnitContent["mitra_x-api.service"]
+	if !ok {
+		t.Fatal("unit tidak ditulis")
+	}
+	for _, terlarang := range []string{"venv", "uvicorn", "main:app"} {
+		if strings.Contains(unit, terlarang) {
+			t.Fatalf("unit menyebut %q:\n%s", terlarang, unit)
+		}
+	}
+	apiDir := filepath.Join(i.cfg.APIDirBase, "mitra_x-api")
+	if !strings.Contains(unit, "ExecStart="+apiDir+"/freeradius-api") {
+		t.Fatalf("unit tidak menunjuk biner Go:\n%s", unit)
+	}
+}
+
+// Tanpa bootstrap, create DITOLAK sebelum apa pun disentuh: tak ada port
+// teralokasi, tak ada DB (sqlmock tanpa ekspektasi — panggilan apa pun gagal),
+// tak ada config FreeRADIUS, tak ada unit.
+func TestCreateInstance_TanpaBootstrapDitolak(t *testing.T) {
+	i, sysctl, fr, fs, mock, cleanup := newCreateTestImpl(t)
+	defer cleanup()
+	i.cfg.APIBootstrap = nil
+
+	_, err := i.CreateInstance(context.Background(), createReq("mitra_x"))
+	if !errors.Is(err, ErrBootstrapTidakAktif) {
+		t.Fatalf("expected ErrBootstrapTidakAktif, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "RM_API_GO_REPO") {
+		t.Fatalf("pesan galat tidak menyebut cara memperbaikinya: %v", err)
+	}
+	if len(sysctl.UnitContent) != 0 || len(sysctl.Calls) != 0 {
+		t.Errorf("systemd disentuh: units=%v calls=%v", sysctl.UnitContent, sysctl.Calls)
+	}
+	if len(fs.Files) != 0 || len(fs.Symlinks) != 0 {
+		t.Errorf("berkas tertulis: %v %v", keys(fs.Files), fs.Symlinks)
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("freeradius disentuh: %v", fr.Calls)
+	}
+	if used, _ := i.cfg.Ports.UsedPorts(); len(used) != 0 {
+		t.Errorf("port teralokasi: %v", used)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("sqlmock: %v", err)
+	}
+}
+
 func TestCreateInstance_WithMaintenance_InstallsTimers(t *testing.T) {
-	i, _, _, fs, mock, cleanup := newCreateTestImpl(t)
+	i, _, _, _, mock, cleanup := newCreateTestImpl(t)
 	defer cleanup()
 
-	// Bootstrap is required for the maintenance branch to fire.
-	mockGit := system.NewMockGit()
-	mockPy := system.NewMockPython()
-	bootstrap := &FreeRADIUSAPIBootstrap{
-		RepoURL:     "https://github.com/heirro/freeradius-api",
-		TemplateDir: filepath.Join(t.TempDir(), "fr-api-template"),
-		Git:         mockGit,
-		Python:      mockPy,
-		FS:          fs,
-	}
-	i.cfg.APIBootstrap = bootstrap
 	maint := system.NewMockMaintenance()
 	i.cfg.Maintenance = &MaintenanceManager{
 		Backend:    maint,
@@ -409,19 +450,9 @@ func TestCreateInstance_WithMaintenance_InstallsTimers(t *testing.T) {
 }
 
 func TestCreateInstance_MaintenanceFailure_RollsBack(t *testing.T) {
-	i, sysctl, _, fs, mock, cleanup := newCreateTestImpl(t)
+	i, sysctl, _, _, mock, cleanup := newCreateTestImpl(t)
 	defer cleanup()
 
-	mockGit := system.NewMockGit()
-	mockPy := system.NewMockPython()
-	bootstrap := &FreeRADIUSAPIBootstrap{
-		RepoURL:     "https://github.com/heirro/freeradius-api",
-		TemplateDir: filepath.Join(t.TempDir(), "fr-api-template"),
-		Git:         mockGit,
-		Python:      mockPy,
-		FS:          fs,
-	}
-	i.cfg.APIBootstrap = bootstrap
 	maint := system.NewMockMaintenance()
 	maint.Failures["InstallJob"] = errors.New("systemd dead")
 	i.cfg.Maintenance = &MaintenanceManager{Backend: maint, APIDirBase: i.cfg.APIDirBase}
@@ -457,20 +488,10 @@ func TestCreateInstance_MaintenanceFailure_RollsBack(t *testing.T) {
 }
 
 func TestCreateInstance_BootstrapFailureRollsBack(t *testing.T) {
-	i, sysctl, _, fs, mock, cleanup := newCreateTestImpl(t)
+	i, sysctl, _, _, mock, cleanup := newCreateTestImpl(t)
 	defer cleanup()
 
-	mockGit := system.NewMockGit()
-	mockPy := system.NewMockPython()
-	mockPy.Failures["CreateVenv"] = errors.New("python missing")
-	bootstrap := &FreeRADIUSAPIBootstrap{
-		RepoURL:     "https://github.com/heirro/freeradius-api",
-		TemplateDir: filepath.Join(t.TempDir(), "fr-api-template"),
-		Git:         mockGit,
-		Python:      mockPy,
-		FS:          fs,
-	}
-	i.cfg.APIBootstrap = bootstrap
+	i.cfg.APIBootstrap.Go.(*system.MockGo).Failures["Build"] = errors.New("go build gagal")
 
 	// DB expectations + cleanup expectations (rollback drops DB).
 	mock.ExpectExec("USE `mitra_x`").WillReturnError(sqlmock.ErrCancelled)
@@ -493,7 +514,7 @@ func TestCreateInstance_BootstrapFailureRollsBack(t *testing.T) {
 	mock.ExpectExec("FLUSH PRIVILEGES").WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err == nil {
-		t.Fatal("expected CreateInstance to fail when bootstrap venv fails")
+		t.Fatal("expected CreateInstance to fail when bootstrap build fails")
 	}
 
 	// systemd unit must not have been written (we failed before that step).
