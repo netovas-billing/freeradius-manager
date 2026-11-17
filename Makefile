@@ -43,7 +43,10 @@ test-install-unit: ## Uji unit systemd terbitan install.sh (tanpa root).
 test-runtime-api: ## Runtime Python ditolak (radius-manager.sh + install.sh) & urutan cek template Go sebelum create_database.
 	./scripts/test-runtime-api.sh
 
-test-scripts: test-install-publish-ip test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel test-ruang-vpn test-runtime-api ## Semua uji sisi skrip.
+test-kesehatan-radius: ## Client kesehatan FreeRADIUS (create + aktifkan-kesehatan) di radius-manager.sh, paritas dgn template Go.
+	./scripts/test-kesehatan-radius.sh
+
+test-scripts: test-install-publish-ip test-port-block test-vpn-config test-install-unit test-vpn-unit-tunnel test-ruang-vpn test-runtime-api test-kesehatan-radius ## Semua uji sisi skrip.
 
 test-race: ## Run unit tests with the race detector.
 	$(GO) test -race ./...
@@ -103,6 +106,6 @@ clean: ## Remove build artifacts.
 	rm -rf bin
 	$(GO) clean -testcache
 
-.PHONY: help build test test-install-publish-ip test-port-block test-ruang-vpn test-runtime-api test-vpn-config test-install-unit test-vpn-unit-tunnel test-scripts test-race test-integration test-integration-compose vet \
+.PHONY: help build test test-kesehatan-radius test-install-publish-ip test-port-block test-ruang-vpn test-runtime-api test-vpn-config test-install-unit test-vpn-unit-tunnel test-scripts test-race test-integration test-integration-compose vet \
         docker-up docker-down docker-clean docker-logs docker-shell docker-token docker-supervisor \
         e2e tidy fmt clean

@@ -212,6 +212,37 @@ server {{ .InstanceName }} {
 # ============================================================================
 server dynclients_{{ .InstanceName }} {
     authorize {
+{{- if .HealthSecret }}
+        # >>> netovas-health
+        # Client pemeriksaan kesehatan (GET /api/v1/radius/health milik
+        # freeradius-api instance ini, di mesin yang sama): Access-Request
+        # sengaja-salah dari 127.0.0.1 ke port auth; jawaban APA PUN
+        # membuktikan FreeRADIUS hidup dan modul SQL-nya termuat. ERP memakainya
+        # sebelum memindahkan router ke server ini. Secret yang sama ada di
+        # RADIUS_HEALTH_SECRET pada .env API instance.
+        #
+        # SENGAJA client DINAMIS, bukan `client { ipaddr = 127.0.0.1 }` statis
+        # di daftar dynclist: client SQL masuk ke daftar yang sama, dan satu
+        # baris `nas` ber-nasname 127.0.0.1/localhost (wajar dibuat teknisi
+        # untuk radtest) menjadi DUPLIKAT client statis itu — FreeRADIUS
+        # menolak start ("Failed to add duplicate client") dan SEMUA instance
+        # di mesin ini mati (teruji di freeradius-server 3.2.10). Client dinamis
+        # tak pernah bertabrakan; paling buruk baris `nas` itu yang menang dan
+        # pemeriksaan kesehatan menjawab gagal — mencegah pindah, bukan
+        # mematikan mesin. Hanya terjangkau dari mesin ini sendiri (loopback).
+        if (&Packet-Src-IP-Address == 127.0.0.1) {
+            update control {
+                &FreeRADIUS-Client-IP-Address     = 127.0.0.1
+                &FreeRADIUS-Client-Shortname      = "netovas_health"
+                &FreeRADIUS-Client-Secret         = "{{ .HealthSecret }}"
+                &FreeRADIUS-Client-NAS-Type       = "other"
+                &FreeRADIUS-Client-Virtual-Server = "{{ .InstanceName }}"
+            }
+            ok
+            return
+        }
+        # <<< netovas-health
+{{- end }}
         if ("%{sql_{{ .InstanceName }}: SELECT nasname FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}") {
             update control {
                 &FreeRADIUS-Client-IP-Address     = "%{Packet-Src-IP-Address}"

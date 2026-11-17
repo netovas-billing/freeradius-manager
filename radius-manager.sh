@@ -870,22 +870,421 @@ EOF
     success "Inner tunnel: inner-tunnel-${ADMIN_USERNAME}"
 }
 
+# >>> kesehatan-radius
+# ============================================
+# Pemeriksaan kesehatan FreeRADIUS per instance
+# ============================================
+# freeradius-api punya GET /api/v1/radius/health: ia mengirim Access-Request
+# sengaja-salah ke RADIUS_HEALTH_ADDR (127.0.0.1:<port auth>) dengan secret
+# RADIUS_HEALTH_SECRET; jawaban APA PUN = FreeRADIUS hidup. ERP memakainya
+# SEBELUM memindahkan router ke server ini — insiden 17 Nov 2026: ERP hanya
+# memeriksa API (sehat) lalu menyatakan "Siap dipasang" padahal FreeRADIUS
+# MATI, router dialihkan, semua login "radius timeout".
+#
+# Secret yang sama harus ada di DUA tempat: .env API dan client kesehatan di
+# virtual server dynclients_<nama>. Bentuk client-nya SAMA dengan template Go
+# (internal/templates/templates/virtual_server.tmpl, di antara penanda
+# netovas-health) — dijaga scripts/test-kesehatan-radius.sh.
+
+# jaringan_client_dinamis — RM_API_DYNAMIC_CLIENT_NET dengan aturan yang SAMA
+# dengan internal/config jaringanClientDinamis: kosong → 0.0.0.0/0 (keputusan
+# pemilik 29 Sep 2026), "off"/"none"/"-"/"mati" → kosong (fitur mati). Dulu
+# skrip ini memperlakukan kosong sebagai MATI dan meneruskan "off" mentah ke
+# `ipaddr = off` (FreeRADIUS gagal parse → seluruh mesin mati), sehingga
+# instance yang dibuat lewat skrip berbeda bentuk dengan yang dibuat ERP.
+jaringan_client_dinamis() {
+    local v="${RM_API_DYNAMIC_CLIENT_NET:-}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
+        off|none|-|mati) echo "" ;;
+        "")              echo "0.0.0.0/0" ;;
+        *)               echo "$v" ;;
+    esac
+}
+
+# secret_kesehatan_sah <secret> — 16–64 huruf/angka (paritas
+# templates.HealthSecretValid). Nilainya ditanam di dalam kutip config yang
+# dimuat SATU daemon untuk SEMUA instance; satu kutip nyasar mematikan mesin.
+secret_kesehatan_sah() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9]{16,64}$ ]]
+}
+
+# blok_kesehatan_dynclients <instance> <secret> — cabang pertama
+# `authorize { }` virtual server dynclients_<instance>.
+#
+# SENGAJA client DINAMIS, bukan `client { ipaddr = 127.0.0.1 }` statis: teruji
+# di freeradius-server 3.2.10, client statis + satu baris `nas` ber-nasname
+# 127.0.0.1 di DB instance = "Failed to add duplicate client" → FreeRADIUS
+# tidak start → SEMUA instance di mesin ini mati.
+blok_kesehatan_dynclients() {
+    local A=$1 S=$2
+    sed -e "s/__INSTANCE__/${A}/g" -e "s/__SECRET__/${S}/g" << 'EOF'
+        # >>> netovas-health
+        # Client pemeriksaan kesehatan (GET /api/v1/radius/health milik
+        # freeradius-api instance ini, di mesin yang sama): Access-Request
+        # sengaja-salah dari 127.0.0.1 ke port auth; jawaban APA PUN
+        # membuktikan FreeRADIUS hidup dan modul SQL-nya termuat. ERP memakainya
+        # sebelum memindahkan router ke server ini. Secret yang sama ada di
+        # RADIUS_HEALTH_SECRET pada .env API instance.
+        #
+        # SENGAJA client DINAMIS, bukan `client { ipaddr = 127.0.0.1 }` statis
+        # di daftar dynclist: client SQL masuk ke daftar yang sama, dan satu
+        # baris `nas` ber-nasname 127.0.0.1/localhost (wajar dibuat teknisi
+        # untuk radtest) menjadi DUPLIKAT client statis itu — FreeRADIUS
+        # menolak start ("Failed to add duplicate client") dan SEMUA instance
+        # di mesin ini mati (teruji di freeradius-server 3.2.10). Client dinamis
+        # tak pernah bertabrakan; paling buruk baris `nas` itu yang menang dan
+        # pemeriksaan kesehatan menjawab gagal — mencegah pindah, bukan
+        # mematikan mesin. Hanya terjangkau dari mesin ini sendiri (loopback).
+        if (&Packet-Src-IP-Address == 127.0.0.1) {
+            update control {
+                &FreeRADIUS-Client-IP-Address     = 127.0.0.1
+                &FreeRADIUS-Client-Shortname      = "netovas_health"
+                &FreeRADIUS-Client-Secret         = "__SECRET__"
+                &FreeRADIUS-Client-NAS-Type       = "other"
+                &FreeRADIUS-Client-Virtual-Server = "__INSTANCE__"
+            }
+            ok
+            return
+        }
+        # <<< netovas-health
+EOF
+}
+
+# blok_env_kesehatan <alamat> <secret> — bagian .env API (paritas
+# renderBlokKesehatanEnv di internal/manager/bootstrap.go).
+blok_env_kesehatan() {
+    local ADDR=$1 S=$2
+    cat << EOF
+# Pemeriksaan kesehatan FreeRADIUS (GET /api/v1/radius/health). Secret yang
+# SAMA ditanam di virtual server dynclients_<instance> — ubah keduanya
+# bersamaan (radius-manager.sh aktifkan-kesehatan) atau jangan sama sekali.
+RADIUS_HEALTH_ADDR=${ADDR}
+RADIUS_HEALTH_SECRET=${S}
+EOF
+}
+
+# secret_kesehatan_dari_config <berkas site> — secret di antara penanda
+# netovas-health; kosong bila blok belum ada.
+secret_kesehatan_dari_config() {
+    awk '/# >>> netovas-health/{a=1} a && /FreeRADIUS-Client-Secret/{
+            s=$0; sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); print s; exit }
+         /# <<< netovas-health/{a=0}' "$1" 2>/dev/null
+}
+
+# nilai_env <berkas> <kunci> — nilai baris KUNCI=... terakhir (tanpa source).
+nilai_env() {
+    grep -E "^$2=" "$1" 2>/dev/null | tail -n1 | cut -d= -f2-
+}
+
+# sisipkan_blok_kesehatan <berkas site> <instance> <secret> — menyisipkan blok
+# tepat sesudah baris `authorize {` pertama di dalam
+# `server dynclients_<instance> {`. Gagal (rc 1) bila tempatnya tak ditemukan
+# atau hasilnya tidak memuat tepat satu pasang penanda. Berkas asli ditimpa
+# ISINYA saja (pemilik/mode tetap).
+sisipkan_blok_kesehatan() {
+    local F=$1 A=$2 S=$3 TMP
+    TMP=$(mktemp) || return 1
+    blok_kesehatan_dynclients "$A" "$S" > "${TMP}.blok" || { rm -f "$TMP" "${TMP}.blok"; return 1; }
+    awk -v hdr="server dynclients_${A} {" -v blok="${TMP}.blok" '
+        { print }
+        $0 == hdr { di = 1; next }
+        di && !sudah && $0 ~ /^[[:space:]]*authorize[[:space:]]*\{[[:space:]]*$/ {
+            while ((getline baris < blok) > 0) print baris
+            sudah = 1
+        }
+        END { if (!sudah) exit 3 }' "$F" > "$TMP"
+    local rc=$?
+    rm -f "${TMP}.blok"
+    if [ $rc -ne 0 ] || [ "$(grep -c '# >>> netovas-health' "$TMP")" != 1 ] \
+        || [ "$(grep -c '# <<< netovas-health' "$TMP")" != 1 ]; then
+        rm -f "$TMP"
+        return 1
+    fi
+    cat "$TMP" > "$F" && rm -f "$TMP"
+}
+
+# tulis_env_kesehatan <berkas .env> <alamat> <secret> — ganti/tambah dua kunci
+# kesehatan. rc 0 = berubah, rc 1 = sudah sama (tak disentuh), rc 2 = galat.
+tulis_env_kesehatan() {
+    local E=$1 ADDR=$2 S=$3 TMP
+    if [ "$(nilai_env "$E" RADIUS_HEALTH_ADDR)" = "$ADDR" ] \
+        && [ "$(nilai_env "$E" RADIUS_HEALTH_SECRET)" = "$S" ]; then
+        return 1
+    fi
+    TMP=$(mktemp) || return 2
+    {
+        grep -vE '^(RADIUS_HEALTH_ADDR|RADIUS_HEALTH_SECRET)=' "$E"
+        echo ""
+        blok_env_kesehatan "$ADDR" "$S"
+    } > "$TMP" || { rm -f "$TMP"; return 2; }
+    cat "$TMP" > "$E" && rm -f "$TMP" && chmod 600 "$E" || return 2
+    return 0
+}
+
+# uji_radius_kesehatan <port auth> <secret> — rc 0 bila FreeRADIUS menjawab
+# (Accept/Reject/Challenge apa pun). Kode keluar radclient TIDAK dipakai: ia
+# sama-sama 1 untuk Access-Reject maupun tanpa jawaban.
+uji_radius_kesehatan() {
+    local P=$1 S=$2
+    command -v radclient >/dev/null 2>&1 || return 2
+    printf 'User-Name = "__netovas_health__"\nUser-Password = "%s"\n' "$(generate_password)" \
+        | radclient -r 2 -t 3 "127.0.0.1:${P}" auth "$S" 2>&1 \
+        | grep -qE 'Received Access-(Accept|Reject|Challenge)'
+}
+
+# cek_endpoint_kesehatan <instance> <api dir> — panggil endpoint API-nya sendiri
+# sesudah .env diperbarui, supaya operator melihat hasil akhirnya (yang juga
+# dilihat ERP), bukan sekadar "berkas sudah ditulis". rc 1 hanya untuk 503.
+cek_endpoint_kesehatan() {
+    local A=$1 D=$2 PORT USR SANDI KODE i HASIL
+    command -v curl >/dev/null 2>&1 || { warning "[$A] curl tidak ada — endpoint tidak diuji"; return 0; }
+    PORT=$(nilai_env "$D/.env" PORT)
+    USR=$(nilai_env "$D/.env" BASIC_AUTH_USER)
+    SANDI=$(nilai_env "$D/.env" BASIC_AUTH_PASSWORD)
+    HASIL=$(mktemp) || return 0
+    for i in 1 2 3 4 5; do
+        KODE=$(curl -s -o "$HASIL" -w '%{http_code}' -m 10 \
+            -u "${USR}:${SANDI}" "http://127.0.0.1:${PORT}/api/v1/radius/health" 2>/dev/null) || KODE=000
+        [ "$KODE" != "000" ] && break
+        sleep 1
+    done
+    case "$KODE" in
+        200) success "[$A] /api/v1/radius/health → 200 (FreeRADIUS menjawab)" ;;
+        404) warning "[$A] /api/v1/radius/health → 404: biner freeradius-api instance ini belum punya endpoint kesehatan."
+             warning "      Perbarui biner: bash update.sh (hanya me-restart API instance yang binernya berubah)." ;;
+        501) warning "[$A] /api/v1/radius/health → 501: API belum membaca RADIUS_HEALTH_SECRET (restart ${A}-api)." ;;
+        503) error   "[$A] /api/v1/radius/health → 503: $(cat "$HASIL" 2>/dev/null)"
+             rm -f "$HASIL"; return 1 ;;
+        *)   warning "[$A] /api/v1/radius/health → ${KODE} (API di port ${PORT} belum menjawab?)" ;;
+    esac
+    rm -f "$HASIL"
+    return 0
+}
+
+# aktifkan_kesehatan [--restart] (<instance>... | --semua)
+#
+# Jalur AMAN memasang pemeriksaan kesehatan ke instance LAMA (dibuat sebelum
+# fitur ini ada). Instance BARU sudah mendapatkannya saat create.
+#
+# Urutannya disengaja:
+#   1. Sisipkan client kesehatan ke config FreeRADIUS tiap instance (cadangan
+#      di $FREERADIUS_DIR/.cadangan-kesehatan/), lalu `freeradius -XC` SEKALI;
+#      gagal → SEMUA berkas dipulihkan, tak ada yang di-restart.
+#   2. FreeRADIUS HANYA di-restart dengan --restart. Restart memutus sesaat
+#      SEMUA instance di mesin ini, jadi itu keputusan operator, bukan efek
+#      samping. Tanpa --restart, client baru termuat pada restart berikutnya.
+#   3. .env API ditulis HANYA bila FreeRADIUS benar-benar menjawab dengan
+#      secret itu (atau FreeRADIUS sedang mati — 503 yang jujur). Menulis .env
+#      lebih dulu membuat API menjawab 503 "FreeRADIUS mati" untuk server
+#      yang sehat, dan ERP akan menolak memindahkan router ke sana.
+#   4. Unit <instance>-api di-restart hanya bila .env-nya berubah, lalu
+#      endpointnya diuji.
+# Idempoten: menjalankan ulang tidak menggandakan apa pun.
+aktifkan_kesehatan() {
+    local RESTART=false SEMUA=false NAMA=() x f
+    for x in "$@"; do
+        case "$x" in
+            --restart) RESTART=true ;;
+            --semua)   SEMUA=true ;;
+            -*)        error "Opsi tidak dikenal: $x"; return 1 ;;
+            *)         NAMA+=("$x") ;;
+        esac
+    done
+    if $SEMUA; then
+        for f in "$FREERADIUS_DIR"/.instance_*; do
+            [ -f "$f" ] && NAMA+=("${f##*/.instance_}")
+        done
+    fi
+    if [ ${#NAMA[@]} -eq 0 ]; then
+        error "Sebut nama instance, atau --semua"
+        return 1
+    fi
+
+    local CADANGAN_DIR="$FREERADIUS_DIR/.cadangan-kesehatan" STAMP
+    STAMP=$(date +%Y%m%d%H%M%S)
+    local DIUBAH=() SIAP=() GAGAL=0
+    local A SITE INFO APIDIR ENVF SECRET
+
+    pulihkan_kesehatan() {
+        local B
+        for B in "${DIUBAH[@]}"; do
+            if cat "$CADANGAN_DIR/${B}.${STAMP}" > "$SITES_AVAILABLE/${B}"; then
+                warning "[$B] config dipulihkan dari cadangan"
+            else
+                error "[$B] GAGAL memulihkan — salin manual: $CADANGAN_DIR/${B}.${STAMP} → $SITES_AVAILABLE/${B}"
+            fi
+        done
+    }
+
+    for A in "${NAMA[@]}"; do
+        if ! [[ "$A" =~ ^[A-Za-z0-9_]{1,64}$ ]]; then
+            error "Nama instance tidak sah: $A"; GAGAL=1; continue
+        fi
+        INFO="$FREERADIUS_DIR/.instance_${A}"
+        SITE="$SITES_AVAILABLE/${A}"
+        APIDIR="${API_DIR_BASE}/${A}-api"
+        ENVF="$APIDIR/.env"
+        if [ ! -f "$INFO" ] || [ ! -f "$SITE" ]; then
+            error "[$A] instance tidak ditemukan ($INFO / $SITE)"; GAGAL=1; continue
+        fi
+        AUTH_PORT=""
+        DB_NAME=""
+        load_instance_info "$INFO"
+        if ! [[ "$AUTH_PORT" =~ ^[0-9]+$ ]]; then
+            error "[$A] AUTH_PORT tidak terbaca dari $INFO"; GAGAL=1; continue
+        fi
+        if ! grep -q "^server dynclients_${A} {" "$SITE"; then
+            warning "[$A] dibuat TANPA NAS dinamis (RM_API_DYNAMIC_CLIENT_NET mati saat create):"
+            warning "      tak ada tempat aman untuk client kesehatan. ERP akan melihat 'tak didukung' (501). Dilewati."
+            continue
+        fi
+        if [ -d "$APIDIR/venv" ]; then
+            warning "[$A] runtime Python lama — tak punya endpoint kesehatan. Dilewati."
+            continue
+        fi
+        if [ ! -f "$ENVF" ]; then
+            error "[$A] $ENVF tidak ada"; GAGAL=1; continue
+        fi
+
+        SECRET=$(secret_kesehatan_dari_config "$SITE")
+        if [ -n "$SECRET" ]; then
+            if ! secret_kesehatan_sah "$SECRET"; then
+                error "[$A] secret kesehatan di $SITE tidak sah — perbaiki manual"; GAGAL=1; continue
+            fi
+            info "[$A] client kesehatan sudah ada di config"
+        else
+            SECRET=$(nilai_env "$ENVF" RADIUS_HEALTH_SECRET)
+            secret_kesehatan_sah "$SECRET" || SECRET=$(generate_password)
+            secret_kesehatan_sah "$SECRET" || SECRET=$(generate_password)
+            if ! secret_kesehatan_sah "$SECRET"; then
+                error "[$A] gagal membangkitkan secret"; GAGAL=1; continue
+            fi
+            if ! { mkdir -p "$CADANGAN_DIR" && chmod 700 "$CADANGAN_DIR" \
+                    && cp -p "$SITE" "$CADANGAN_DIR/${A}.${STAMP}"; }; then
+                error "[$A] gagal membuat cadangan config — tidak diubah"; GAGAL=1; continue
+            fi
+            if ! sisipkan_blok_kesehatan "$SITE" "$A" "$SECRET"; then
+                error "[$A] tempat sisip (server dynclients_${A} { authorize {) tak ditemukan — tidak diubah"
+                GAGAL=1; continue
+            fi
+            DIUBAH+=("$A")
+            success "[$A] client kesehatan ditambahkan ke $SITE"
+        fi
+        SIAP+=("${A}|${AUTH_PORT}|${SECRET}|${APIDIR}|${DB_NAME}")
+    done
+
+    if [ ${#DIUBAH[@]} -gt 0 ]; then
+        local OUT
+        OUT=$(freeradius -XC 2>&1) || true
+        if ! grep -q "Configuration appears to be OK" <<<"$OUT"; then
+            error "Config FreeRADIUS GAGAL divalidasi sesudah perubahan — semua dipulihkan:"
+            grep -iE "error|failed|unknown|cannot|duplicate" <<<"$OUT" | head -20
+            pulihkan_kesehatan
+            return 1
+        fi
+        success "Config FreeRADIUS valid (freeradius -XC)"
+    fi
+
+    # --restart hanya me-restart bila memang perlu: ada config yang baru
+    # diubah, atau ada client kesehatan (mis. dipasang run sebelumnya tanpa
+    # --restart) yang belum dijawab FreeRADIUS. Semua sudah menjawab = tak ada
+    # alasan memutus seluruh instance di mesin ini.
+    local DIRESTART=false BUTUH_RESTART=false e2 N2 P2 S2
+    if $RESTART; then
+        if [ ${#DIUBAH[@]} -gt 0 ]; then
+            BUTUH_RESTART=true
+        else
+            for e2 in "${SIAP[@]}"; do
+                IFS='|' read -r N2 P2 S2 _ <<<"$e2"
+                uji_radius_kesehatan "$P2" "$S2" || { BUTUH_RESTART=true; break; }
+            done
+        fi
+    fi
+    if $BUTUH_RESTART; then
+        if ! restart_freeradius; then
+            error "Restart FreeRADIUS gagal — perubahan dipulihkan, FreeRADIUS dinyalakan ulang dengan config lama"
+            pulihkan_kesehatan
+            restart_freeradius || true
+            return 1
+        fi
+        DIRESTART=true
+    fi
+
+    local FR_HIDUP=false PERLU_RESTART=false e N P S D DB rc NLOKAL
+    systemctl is-active --quiet freeradius 2>/dev/null && FR_HIDUP=true
+    for e in "${SIAP[@]}"; do
+        IFS='|' read -r N P S D DB <<<"$e"
+        uji_radius_kesehatan "$P" "$S"
+        rc=$?
+        if [ $rc -eq 2 ]; then
+            error "radclient tidak ada: apt install freeradius-utils"; return 1
+        elif [ $rc -eq 0 ]; then
+            success "[$N] FreeRADIUS menjawab di 127.0.0.1:$P"
+        elif ! $FR_HIDUP; then
+            warning "[$N] FreeRADIUS sedang MATI — .env tetap ditulis supaya /api/v1/radius/health jujur melaporkan 503"
+        elif ! $DIRESTART && [[ " ${DIUBAH[*]} " == *" $N "* ]]; then
+            info "[$N] client kesehatan baru termuat sesudah FreeRADIUS di-restart — .env belum ditulis"
+            PERLU_RESTART=true
+            continue
+        else
+            NLOKAL=$(mysql_cmd "$DB" -N -e "SELECT COUNT(*) FROM nas WHERE nasname IN ('127.0.0.1','localhost')" 2>/dev/null) || NLOKAL="?"
+            error "[$N] FreeRADIUS hidup tapi TIDAK menjawab pemeriksaan kesehatan di 127.0.0.1:$P. Kemungkinan:"
+            error "      1) FreeRADIUS belum di-restart sejak client kesehatan dipasang → $0 aktifkan-kesehatan $N --restart"
+            error "      2) tabel nas DB '$DB' punya baris nasname 127.0.0.1/localhost (ditemukan: ${NLOKAL:-?}) yang"
+            error "         menimpa client kesehatan → hapus baris itu, lalu restart FreeRADIUS"
+            error "      .env TIDAK ditulis (API tetap 501, bukan 503 palsu)."
+            GAGAL=1
+            continue
+        fi
+        tulis_env_kesehatan "$D/.env" "127.0.0.1:${P}" "$S"
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            success "[$N] RADIUS_HEALTH_ADDR/SECRET ditulis ke $D/.env"
+            if systemctl restart "${N}-api" 2>/dev/null; then
+                success "[$N] ${N}-api di-restart"
+                cek_endpoint_kesehatan "$N" "$D" || GAGAL=1
+            else
+                error "[$N] gagal restart ${N}-api — jalankan: systemctl restart ${N}-api"; GAGAL=1
+            fi
+        elif [ $rc -eq 1 ]; then
+            info "[$N] .env sudah memuat alamat & secret yang sama"
+            cek_endpoint_kesehatan "$N" "$D" || GAGAL=1
+        else
+            error "[$N] gagal menulis $D/.env"; GAGAL=1
+        fi
+    done
+
+    if $PERLU_RESTART; then
+        echo ""
+        warning "Client kesehatan sudah DITULIS dan DIVALIDASI, tapi belum termuat FreeRADIUS."
+        warning "Restart FreeRADIUS memutus sesaat SEMUA instance di mesin ini — pilih jam sepi, lalu:"
+        warning "    $0 aktifkan-kesehatan ${NAMA[*]} --restart"
+        warning "(atau '$0 restart' lalu jalankan perintah ini lagi tanpa --restart)"
+    fi
+    return $GAGAL
+}
+# <<< kesehatan-radius
+
 # ============================================
 # FUNCTION: Create Virtual Server
 # ============================================
 create_virtual_server() {
-    local ADMIN_USERNAME=$1 AUTH_PORT=$2
+    local ADMIN_USERNAME=$1 AUTH_PORT=$2 HEALTH_SECRET=${3:-}
     local ACCT_PORT=$((AUTH_PORT + 1))
     local COA_PORT=$((AUTH_PORT + 2000))
     local SERVER_NAME="${ADMIN_USERNAME}"          # <-- TANPA prefix pppoe_
     local SERVER_FILE="$SITES_AVAILABLE/$SERVER_NAME"
 
     # NAS dinamis. Gerbangnya env yang SAMA dengan jalur Go
-    # (internal/config.Load → templates.Vars.DynamicClientNet); kosong berarti
-    # fitur mati dan berkas ini persis seperti sebelumnya. Paritas ini bukan
-    # kemewahan: jalur bash pernah terlewat saat migrasi runtime Python→Go,
-    # dan akibatnya `create` diam-diam tetap memakai jalur lama.
-    local DYN_NET="${RM_API_DYNAMIC_CLIENT_NET:-}"
+    # (internal/config.Load → templates.Vars.DynamicClientNet), termasuk
+    # bawaannya (kosong = 0.0.0.0/0) dan sakelar mati ("off") — lihat
+    # jaringan_client_dinamis. Paritas ini bukan kemewahan: jalur bash pernah
+    # terlewat saat migrasi runtime Python→Go, dan akibatnya `create` diam-diam
+    # tetap memakai jalur lama.
+    local DYN_NET
+    DYN_NET=$(jaringan_client_dinamis)
     local DYN_MARKER="%%TANPA-DAFTAR-DINAMIS%%"
     # Saat fitur MATI nilainya penanda, bukan string kosong: `${DYN_LISTEN}`
     # yang kosong meninggalkan baris hampa di dalam setiap blok listen, dan
@@ -1080,6 +1479,15 @@ server dynclients_${SERVER_NAME} {
     }
 }
 EOF
+        # Client pemeriksaan kesehatan — lewat jalur sisip yang SAMA dengan
+        # `aktifkan-kesehatan` untuk instance lama, jadi hanya ada satu
+        # bentuk yang perlu benar.
+        if [ -n "$HEALTH_SECRET" ]; then
+            sisipkan_blok_kesehatan "$SERVER_FILE" "$SERVER_NAME" "$HEALTH_SECRET" || {
+                error "Gagal menyisipkan client kesehatan ke $SERVER_FILE"
+                return 1
+            }
+        fi
     fi
 
     sed -i "/^${DYN_MARKER}\$/d" "$SERVER_FILE"
@@ -1247,7 +1655,20 @@ test_instance() {
     info "Testing $A — port $ap"
     ss -tulnp 2>/dev/null | grep -q ":${ap} " && \
         success "Port $ap LISTENING" || { error "Port $ap NOT listening!"; return 1; }
-    if command -v radtest &>/dev/null; then
+    # Pakai client kesehatan instance bila ada. `testing123` hanya cocok dengan
+    # client localhost GLOBAL, yang TIDAK berlaku untuk instance ber-daftar
+    # client per-socket (NAS dinamis) — di sana radtest lama selalu timeout.
+    local HS
+    HS=$(nilai_env "${API_DIR_BASE}/${A}-api/.env" RADIUS_HEALTH_SECRET)
+    if secret_kesehatan_sah "$HS"; then
+        info "Uji Access-Request lewat client kesehatan..."
+        if uji_radius_kesehatan "$ap" "$HS"; then
+            success "FreeRADIUS menjawab di 127.0.0.1:${ap}"
+        else
+            error "FreeRADIUS TIDAK menjawab di 127.0.0.1:${ap} (lihat: $0 aktifkan-kesehatan $A)"
+            return 1
+        fi
+    elif command -v radtest &>/dev/null; then
         echo ""
         info "Test Access-Request..."
         radtest testuser testpass "localhost:${ap}" 0 testing123 || true
@@ -1442,6 +1863,7 @@ go_binary() {
 
 setup_api() {
     local A=$1 DB_NAME=$2 DB_USER=$3 DB_PASS=$4 API_PORT=$5
+    local AUTH_PORT=${6:-} HEALTH_SECRET=${7:-}
     local API_DIR="${API_DIR_BASE}/${A}-api"
     local SERVICE_NAME="${A}-api"
     local SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -1526,6 +1948,16 @@ DB_TIMEZONE=Asia/Jakarta
 RATE_LIMIT_MAX=6000
 RATE_LIMIT_WINDOW_SECONDS=60
 ENVEOF
+    if [ -n "$HEALTH_SECRET" ] && [ -n "$AUTH_PORT" ]; then
+        { echo ""; blok_env_kesehatan "127.0.0.1:${AUTH_PORT}" "$HEALTH_SECRET"; } >> "${API_DIR}/.env"
+    else
+        cat >> "${API_DIR}/.env" << 'ENVEOF'
+
+# Pemeriksaan kesehatan FreeRADIUS TIDAK aktif untuk instance ini (NAS dinamis
+# mati, jadi tak ada client kesehatan di config FreeRADIUS-nya). API menjawab
+# 501 di /api/v1/radius/health. Lihat README: "Pemeriksaan kesehatan FreeRADIUS".
+ENVEOF
+    fi
     chmod 600 "${API_DIR}/.env"
     success ".env dibuat"
 
@@ -1707,6 +2139,18 @@ case "${1:-}" in
         DB_USER="${ADMIN_USERNAME}"
         DB_PASS="${3:-$(generate_password)}"
 
+        # Secret pemeriksaan kesehatan FreeRADIUS: SATU nilai untuk config
+        # FreeRADIUS (create_virtual_server) dan .env API (setup_api). Hanya
+        # bila NAS dinamis aktif — client kesehatannya hidup di virtual server
+        # dynclients_<nama>; tanpa itu API menjawab 501 (tak didukung), bukan
+        # 503 palsu yang menghentikan pindah RADIUS tanpa alasan.
+        HEALTH_SECRET=""
+        if [ -n "$(jaringan_client_dinamis)" ]; then
+            HEALTH_SECRET=$(generate_password)
+            secret_kesehatan_sah "$HEALTH_SECRET" || HEALTH_SECRET=$(generate_password)
+            secret_kesehatan_sah "$HEALTH_SECRET" || { error "Gagal membangkitkan secret kesehatan"; exit 1; }
+        fi
+
         # TOLAK kalau instance-nya sudah ada — SEBELUM apa pun berubah.
         #
         # Menjalankan ulang `create` atas instance yang sudah ada TIDAK
@@ -1813,11 +2257,11 @@ INFOEOF
         create_sql_module     "$ADMIN_USERNAME" "$DB_NAME" "$DB_USER" "$DB_PASS"
         create_eap_module     "$ADMIN_USERNAME" "$INNER_PORT"
         create_inner_tunnel   "$ADMIN_USERNAME" "$INNER_PORT"
-        create_virtual_server "$ADMIN_USERNAME" "$AUTH_PORT"
+        create_virtual_server "$ADMIN_USERNAME" "$AUTH_PORT" "$HEALTH_SECRET" || exit 1
         create_log_dir        "$ADMIN_USERNAME"
         register_port         "$AUTH_PORT" "$ADMIN_USERNAME"
         restart_freeradius
-        setup_api             "$ADMIN_USERNAME" "$DB_NAME" "$DB_USER" "$DB_PASS" "$API_PORT"
+        setup_api             "$ADMIN_USERNAME" "$DB_NAME" "$DB_USER" "$DB_PASS" "$API_PORT" "$AUTH_PORT" "$HEALTH_SECRET"
 
         # Kredensial API baru ADA sesudah setup_api menulis .env, jadi dicatat di
         # sini — bukan di heredoc di atas yang berjalan jauh lebih dulu. Tanpa ini
@@ -1947,6 +2391,14 @@ INFOEOF
         ;;
 
     # ------------------------------------------
+    aktifkan-kesehatan)
+        # Pasang pemeriksaan kesehatan FreeRADIUS ke instance LAMA. Status
+        # keluar diteruskan (0 = semua beres) supaya bisa dipakai otomasi.
+        shift
+        aktifkan_kesehatan "$@" || exit 1
+        ;;
+
+    # ------------------------------------------
     test-disconnect)
         [ $# -ge 4 ] || {
             echo "Usage: $0 test-disconnect <admin> <username> <session-id>"
@@ -1994,6 +2446,9 @@ INFOEOF
         echo "  list                               Lihat semua instance"
         echo "  test   <admin>                     Test instance"
         echo "  test-disconnect <admin> <u> <sid>  CoA Disconnect"
+        echo "  aktifkan-kesehatan <admin>...|--semua [--restart]"
+        echo "                                     Pasang pemeriksaan kesehatan FreeRADIUS"
+        echo "                                     ke instance lama (lihat README)"
         echo "  info   <admin>                     Detail instance"
         echo ""
         echo "Contoh:"

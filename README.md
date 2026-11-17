@@ -135,7 +135,7 @@ Script utama untuk membuat, mengelola, dan menghapus instance FreeRADIUS beserta
 3. Mengimport schema FreeRADIUS ke database
 4. Membuat SQL module (`sql_<nama>`) dan EAP module (`eap_<nama>`)
 5. Membuat virtual server & inner tunnel dengan port acak yang belum terpakai
-6. Menyalin biner + skrip pemeliharaan ke `/root/<nama>-api/` dan mengisi `.env` API dengan credentials database dan Basic auth secara otomatis
+6. Menyalin biner + skrip pemeliharaan ke `/root/<nama>-api/` dan mengisi `.env` API dengan credentials database dan Basic auth secara otomatis, plus `RADIUS_HEALTH_ADDR`/`RADIUS_HEALTH_SECRET` untuk pemeriksaan kesehatan FreeRADIUS (lihat [di bawah](#pemeriksaan-kesehatan-freeradius))
 7. Mengisi credentials di `autoclearzombie.sh` + membuat cron job (tiap 30 menit)
 8. Mengisi credentials di `autobackups3.sh` + membuat cron job backup S3 (tiap hari jam 02:00)
 9. Membuat dan mengaktifkan systemd service untuk REST API
@@ -278,7 +278,73 @@ sudo bash radius-manager.sh test-disconnect <nama> <username> <session-id>
 
 Mengirim CoA Disconnect-Request ke instance.
 
+#### `aktifkan-kesehatan`
+
+```bash
+sudo bash radius-manager.sh aktifkan-kesehatan <nama>... [--restart]
+sudo bash radius-manager.sh aktifkan-kesehatan --semua [--restart]
+```
+
+Memasang pemeriksaan kesehatan FreeRADIUS ke instance **lama**. Lihat
+[Pemeriksaan kesehatan FreeRADIUS](#pemeriksaan-kesehatan-freeradius).
+
 ---
+
+### Pemeriksaan kesehatan FreeRADIUS
+
+freeradius-api punya `GET /api/v1/radius/health` (auth Basic yang sama dengan
+endpoint lain). Ia mengirim Access-Request sengaja-salah ke
+`RADIUS_HEALTH_ADDR` dengan `RADIUS_HEALTH_SECRET`; jawaban **apa pun**
+(Accept/Reject) = FreeRADIUS hidup → 200. Tak ada jawaban → 503. Secret tak
+diisi → 501 (ERP menganggapnya "tak didukung"). ERP memakai endpoint ini
+**sebelum** memindahkan router ke server ini (insiden 17 Nov 2026: ERP hanya
+memeriksa API, FreeRADIUS-nya mati, semua login "radius timeout").
+
+Di mesin radius-manager, tiap instance mendapat:
+
+- `.env` API: `RADIUS_HEALTH_ADDR=127.0.0.1:<port auth instance>` +
+  `RADIUS_HEALTH_SECRET=<acak>`;
+- di `sites-available/<nama>`, cabang pertama virtual server
+  `dynclients_<nama>` (di antara penanda `# >>> netovas-health` /
+  `# <<< netovas-health`): paket dari 127.0.0.1 → client dinamis dengan secret
+  yang sama, diproses virtual server instance itu.
+
+Kenapa client **dinamis**, bukan `client { ipaddr = 127.0.0.1 }` statis
+(teruji di freeradius-server 3.2.10): di daftar global, 127.0.0.1 instance kedua
+menduplikasi milik instance pertama; di daftar per-socket `dynclist_<nama>`,
+satu baris `nas` ber-nasname 127.0.0.1 menduplikasinya. Dua-duanya membuat
+FreeRADIUS **menolak start** ("Failed to add duplicate client") — seluruh mesin
+mati. Client dinamis tak pernah bertabrakan; paling buruk baris `nas` itu yang
+menang dan pemeriksaan menjawab 503 (mencegah pindah, tidak mematikan mesin).
+
+Syaratnya NAS dinamis aktif (`RM_API_DYNAMIC_CLIENT_NET`, bawaan `0.0.0.0/0`).
+Instance yang dibuat dengan NAS dinamis **mati** tidak mendapat client
+kesehatan (API menjawab 501).
+
+**Instance BARU** (lewat ERP/RM-API maupun `radius-manager.sh create`) langsung
+mendapatkannya — tak ada langkah tambahan.
+
+**Instance LAMA** (dibuat sebelum fitur ini):
+
+1. Pastikan biner freeradius-api instance sudah punya endpointnya:
+   `sudo bash update.sh` (hanya me-restart API instance yang binernya berubah).
+2. Pasang client + validasi config, **tanpa** restart apa pun:
+   `sudo bash radius-manager.sh aktifkan-kesehatan --semua`
+   — config divalidasi `freeradius -XC`; gagal → semua berkas dipulihkan
+   (cadangan di `/etc/freeradius/3.0/.cadangan-kesehatan/`).
+3. Di jam sepi (restart FreeRADIUS memutus sesaat **semua** instance di mesin
+   ini): `sudo bash radius-manager.sh aktifkan-kesehatan --semua --restart`.
+   FreeRADIUS di-restart sekali, tiap instance diuji dengan `radclient`, `.env`
+   ditulis **hanya** bila FreeRADIUS menjawab, `<nama>-api` di-restart, lalu
+   `/api/v1/radius/health` dipanggil dan hasilnya dicetak.
+
+Aman diulang. `.env` sengaja tidak ditulis selama FreeRADIUS belum memuat
+client-nya — kalau ditulis lebih dulu, API menjawab 503 "FreeRADIUS mati" untuk
+server yang sehat dan ERP menolak memindahkan router ke sana. Tak ada restart
+otomatis: FreeRADIUS hanya di-restart bila operator menulis `--restart`.
+
+> Jangan membuat baris `nas` ber-nasname `127.0.0.1`/`localhost` untuk uji
+> `radtest`: pakai `radius-manager.sh test <nama>` (memakai client kesehatan).
 
 ### Menambahkan NAS (MikroTik/Router)
 

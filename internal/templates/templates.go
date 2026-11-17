@@ -65,6 +65,51 @@ type Vars struct {
 	// dari tabel `nas` dan diperbarui atomik tanpa menyentuh daemon — di luar
 	// cakupan berkas ini.
 	DynamicClientNet string
+
+	// HealthSecret — secret client pemeriksaan kesehatan (127.0.0.1) yang
+	// dipakai freeradius-api instance ini untuk GET /api/v1/radius/health.
+	// Nilai yang SAMA wajib ada di RADIUS_HEALTH_SECRET pada .env API-nya:
+	// secret di sini tanpa .env berarti endpoint menjawab 501, .env tanpa
+	// client di sini berarti FreeRADIUS membuang paketnya dan endpoint
+	// menjawab 503 seolah FreeRADIUS mati.
+	//
+	// Bentuknya client DINAMIS 127.0.0.1 di virtual server dynclients_<nama>,
+	// jadi HANYA dipancarkan bila DynamicClientNet terisi. Bukan client
+	// statis, karena dua-duanya mematikan seluruh mesin (FreeRADIUS menolak
+	// start, "Failed to add duplicate client"):
+	//   - di daftar GLOBAL, client 127.0.0.1 instance kedua menduplikasi milik
+	//     instance pertama (satu daemon memuat semua instance);
+	//   - di daftar per-socket dynclist, baris `nas` ber-nasname 127.0.0.1
+	//     (client SQL masuk daftar yang sama) menduplikasinya.
+	// Kosong = tak ada client kesehatan (API menjawab 501).
+	//
+	// Wajib alfanumerik (GeneratePassword): nilainya ditanam di dalam kutip
+	// konfigurasi FreeRADIUS. Lihat HealthSecretValid.
+	HealthSecret string
+}
+
+// HealthSecretValid — secret kesehatan aman ditanam di konfigurasi FreeRADIUS
+// dan .env: tak kosong, hanya huruf/angka, panjang wajar. Kutip, backslash,
+// atau baris baru di sini akan merusak berkas konfigurasi yang dimuat SATU
+// daemon untuk SEMUA instance di mesin itu.
+func HealthSecretValid(s string) bool {
+	if len(s) < 16 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// AlamatKesehatan — nilai RADIUS_HEALTH_ADDR untuk instance di mesin ini:
+// freeradius-api berjalan di host yang SAMA dengan FreeRADIUS-nya, jadi ia
+// menyapa port auth instance itu lewat loopback. Sumber paketnya 127.0.0.1 —
+// itulah yang dicocokkan cabang kesehatan di virtual server dynclients_<nama>.
+func AlamatKesehatan(authPort int) string {
+	return fmt.Sprintf("127.0.0.1:%d", authPort)
 }
 
 // Render writes the named template (e.g., "sql_module") to w with vars.

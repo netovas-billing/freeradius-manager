@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/netovas-billing/freeradius-manager/internal/system"
+	"github.com/netovas-billing/freeradius-manager/internal/templates"
 )
 
 // S3Config carries the S3 backup destination passed to the
@@ -137,6 +138,14 @@ type SetupInstanceParams struct {
 	// APIPort — wajib untuk runtime go: port di-hardcode ":8000" di aplikasi
 	// sebelum ini, dan satu VM menjalankan banyak instance.
 	APIPort int
+
+	// RadiusHealthAddr / RadiusHealthSecret — tujuan dan secret pemeriksaan
+	// kesehatan FreeRADIUS (GET /api/v1/radius/health freeradius-api).
+	// Addr = 127.0.0.1:<port auth instance>; Secret HARUS sama dengan
+	// templates.Vars.HealthSecret yang ditanam di config FreeRADIUS instance
+	// yang sama. Keduanya kosong = baris tidak ditulis (API menjawab 501).
+	RadiusHealthAddr   string
+	RadiusHealthSecret string
 }
 
 // SetupInstance memasang direktori API satu instance (runtime Go).
@@ -254,6 +263,10 @@ func renderAPIEnvFileGo(p SetupInstanceParams) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("bangkitkan API_KEY: %w", err)
 	}
+	kesehatan, err := renderBlokKesehatanEnv(p)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`# freeradius-api (runtime Go) — instance %s
 # Dihasilkan radius-manager-api. Suntingan manual akan tertimpa saat create ulang.
 
@@ -281,8 +294,40 @@ DB_TIMEZONE=Asia/Jakarta
 
 RATE_LIMIT_MAX=%d
 RATE_LIMIT_WINDOW_SECONDS=60
-`, p.InstanceName, p.APIPort, swUser, p.SwaggerPass, apiKey,
-		p.DBHost, p.DBPort, p.DBName, p.DBUser, p.DBPass, batasRateGo), nil
+%s`, p.InstanceName, p.APIPort, swUser, p.SwaggerPass, apiKey,
+		p.DBHost, p.DBPort, p.DBName, p.DBUser, p.DBPass, batasRateGo, kesehatan), nil
+}
+
+// renderBlokKesehatanEnv — bagian .env untuk GET /api/v1/radius/health.
+//
+// Addr dan Secret wajib DATANG BERDUA: secret tanpa alamat (atau sebaliknya)
+// adalah salah rakit di pemanggil, dan menuliskannya setengah membuat API
+// menjawab 503 "FreeRADIUS mati" untuk instance yang sehat — ERP lalu
+// menghentikan pindah RADIUS tanpa alasan. Ditolak keras di sini.
+func renderBlokKesehatanEnv(p SetupInstanceParams) (string, error) {
+	if p.RadiusHealthAddr == "" && p.RadiusHealthSecret == "" {
+		return `
+# Pemeriksaan kesehatan FreeRADIUS TIDAK aktif untuk instance ini (NAS dinamis
+# mati, jadi tak ada client kesehatan di config FreeRADIUS-nya). API menjawab
+# 501 di /api/v1/radius/health. Lihat README: "Pemeriksaan kesehatan FreeRADIUS".
+`, nil
+	}
+	if p.RadiusHealthAddr == "" || p.RadiusHealthSecret == "" {
+		return "", fmt.Errorf("RadiusHealthAddr dan RadiusHealthSecret harus diisi berdua (addr=%q, secret kosong=%v)",
+			p.RadiusHealthAddr, p.RadiusHealthSecret == "")
+	}
+	if !templates.HealthSecretValid(p.RadiusHealthSecret) {
+		return "", fmt.Errorf("RadiusHealthSecret tidak sah (wajib 16–64 huruf/angka)")
+	}
+	return fmt.Sprintf(`
+# Pemeriksaan kesehatan FreeRADIUS (GET /api/v1/radius/health). API mengirim
+# Access-Request sengaja-salah ke port auth instance ini lewat loopback; jawaban
+# apa pun = FreeRADIUS hidup. ERP memakainya SEBELUM memindahkan router ke
+# server ini. Secret yang SAMA ditanam di virtual server dynclients_%s
+# (sites-available/%s) — ubah keduanya bersamaan atau jangan sama sekali.
+RADIUS_HEALTH_ADDR=%s
+RADIUS_HEALTH_SECRET=%s
+`, p.InstanceName, p.InstanceName, p.RadiusHealthAddr, p.RadiusHealthSecret), nil
 }
 
 // Teardown removes the API directory. Idempotent.
