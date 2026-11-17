@@ -116,12 +116,12 @@ func (i *impl) CreateInstance(ctx context.Context, req types.CreateInstanceReque
 	// Secret pemeriksaan kesehatan FreeRADIUS. SATU nilai, ditanam di DUA
 	// tempat dalam create yang sama: client kesehatan di config FreeRADIUS
 	// (templates.Vars.HealthSecret) dan RADIUS_HEALTH_SECRET di .env API.
-	// Hanya bila NAS dinamis aktif — client kesehatannya hidup di virtual
-	// server dynclients_<nama>; tanpa itu .env dibiarkan tanpa secret supaya
+	// Hanya bila NAS dinamis aktif (KesehatanDidukung) — client kesehatannya
+	// hidup di daftar client per-socket dynclist_<nama>; tanpa itu .env dibiarkan tanpa secret supaya
 	// API menjawab 501 ("belum dikonfigurasi"), bukan 503 palsu ("FreeRADIUS
 	// mati") yang akan menghentikan pindah RADIUS tanpa alasan.
 	healthSecret, healthAddr := "", ""
-	if i.cfg.DynamicClientNet != "" {
+	if templates.KesehatanDidukung(i.cfg.DynamicClientNet) {
 		healthSecret, err = GeneratePassword(32)
 		if err != nil {
 			return nil, fmt.Errorf("generate health secret: %w", err)

@@ -47,7 +47,8 @@ ambil_fungsi() {
     ambil_fungsi load_instance_info
     ambil_fungsi generate_password
 } > "$TMP/fungsi.sh"
-for f in jaringan_client_dinamis blok_kesehatan_dynclients sisipkan_blok_kesehatan aktifkan_kesehatan \
+for f in jaringan_client_dinamis blok_kesehatan_client blok_kesehatan_server sisipkan_blok_kesehatan aktifkan_kesehatan \
+         kesehatan_bisa_dipasang blok_kesehatan_lengkap \
          create_virtual_server load_instance_info generate_password; do
     grep -q "^${f}() {" "$TMP/fungsi.sh" || { fail "fungsi $f tidak ditemukan di $SCRIPT"; exit 1; }
 done
@@ -83,16 +84,29 @@ cek_jaringan " mati "              ""
 cek_jaringan "-"                   ""
 cek_jaringan "none"                ""
 cek_jaringan " 172.31.199.0/24 "   "172.31.199.0/24"
+RM_API_DYNAMIC_CLIENT_NET="" kesehatan_bisa_dipasang && ok "kesehatan: net bawaan (0.0.0.0/0) → dipasang" || fail "kesehatan: net bawaan tak dipasang"
+RM_API_DYNAMIC_CLIENT_NET="172.16.0.0/12" kesehatan_bisa_dipasang && ok "kesehatan: net sempit → TETAP dipasang (client 127.0.0.0/8 sendiri)" \
+    || fail "kesehatan: net sempit tak dipasang"
+RM_API_DYNAMIC_CLIENT_NET="off" kesehatan_bisa_dipasang && fail "kesehatan: NAS dinamis mati tetap dipasang" || ok "kesehatan: NAS dinamis mati → tidak"
+RM_API_DYNAMIC_CLIENT_NET="127.0.0.0/8" kesehatan_bisa_dipasang && fail "kesehatan: net 127.0.0.0/8 (duplicate client) tetap dipasang" \
+    || ok "kesehatan: net persis 127.0.0.0/8 → tidak (prefiks bentrok)"
 
 # -- 2. paritas blok bash ↔ template Go --------------------------------------
 SEC="Sehat0123456789abcdefABCDEF0123"
-awk '/# >>> netovas-health/{a=1} a{print} /# <<< netovas-health/{exit}' "$TMPL" \
-    | sed -e 's/{{ \.InstanceName }}/radius_test1/g' -e "s/{{ \.HealthSecret }}/${SEC}/g" > "$TMP/go.blok"
-blok_kesehatan_dynclients radius_test1 "$SEC" > "$TMP/bash.blok"
-if [ -s "$TMP/go.blok" ] && diff -u "$TMP/go.blok" "$TMP/bash.blok" > "$TMP/beda"; then
-    ok "blok kesehatan bash identik dengan template Go"
+ganti_go() { sed -e 's/{{ \.InstanceName }}/radius_test1/g' -e "s/{{ \.HealthSecret }}/${SEC}/g" -e 's/{{ \.AuthPort }}/14368/g'; }
+awk '/^    # >>> netovas-health-client$/{a=1} a{print} /^    # <<< netovas-health-client$/{exit}' "$TMPL" | ganti_go > "$TMP/go.client"
+blok_kesehatan_client radius_test1 > "$TMP/bash.client"
+if [ -s "$TMP/go.client" ] && diff -u "$TMP/go.client" "$TMP/bash.client" > "$TMP/beda"; then
+    ok "blok client kesehatan bash identik dengan template Go"
 else
-    fail "blok kesehatan bash ≠ template Go:"; cat "$TMP/beda" >&2
+    fail "blok client kesehatan bash ≠ template Go:"; cat "$TMP/beda" >&2
+fi
+awk '/^# >>> netovas-health$/{a=1} a{print} /^# <<< netovas-health$/{exit}' "$TMPL" | ganti_go > "$TMP/go.server"
+blok_kesehatan_server radius_test1 "$SEC" 14368 > "$TMP/bash.server"
+if [ -s "$TMP/go.server" ] && diff -u "$TMP/go.server" "$TMP/bash.server" > "$TMP/beda"; then
+    ok "blok server kesehatan bash identik dengan template Go"
+else
+    fail "blok server kesehatan bash ≠ template Go:"; cat "$TMP/beda" >&2
 fi
 
 # -- 3. create_virtual_server ------------------------------------------------
@@ -101,24 +115,30 @@ buat_site() { # buat_site <nama> <port> <secret> <jaringan>
 }
 buat_site baru1 11000 "$SEC" ""
 F="$SITES_AVAILABLE/baru1"
-if [ "$(grep -c '# >>> netovas-health' "$F")" = 1 ] && [ "$(grep -c '# <<< netovas-health' "$F")" = 1 ]; then
-    ok "create: tepat satu pasang penanda"
-else
-    fail "create: penanda bukan tepat satu pasang"
-fi
-dyn="$(awk '/^server dynclients_baru1 \{/{a=1} a' "$F")"
-i_sehat="$(grep -n 'Packet-Src-IP-Address == 127.0.0.1' <<<"$dyn" | head -1 | cut -d: -f1)"
-i_sql="$(grep -n 'sql_baru1: SELECT nasname' <<<"$dyn" | head -1 | cut -d: -f1)"
-if [ -n "$i_sehat" ] && [ -n "$i_sql" ] && [ "$i_sehat" -lt "$i_sql" ]; then
-    ok "create: cabang kesehatan PERTAMA di dynclients_baru1 (sebelum pencarian nas)"
-else
-    fail "create: cabang kesehatan tidak di tempatnya (sehat=$i_sehat sql=$i_sql)"
-fi
+blok_kesehatan_lengkap "$F" && ok "create: tepat satu pasang penanda client & server" \
+    || fail "create: penanda kesehatan tidak lengkap/ganda"
+dl="$(awk '/^clients dynclist_baru1 \{/{a=1} a{print} a && /^\}$/{exit}' "$F")"
+grep -q "client dyn_baru1 {" <<<"$dl" && grep -q "client dynhealth_baru1 {" <<<"$dl" \
+    && grep -q "ipaddr          = 127.0.0.0/8" <<<"$dl" \
+    && ok "create: client 127.0.0.0/8 di DALAM daftar dynclist_baru1" || fail "create: client kesehatan tak di daftar dynclist: $dl"
+grep -q "(&Packet-Dst-Port == 11000)" "$F" && ok "create: client hanya dibuat untuk port auth 11000" \
+    || fail "create: Packet-Dst-Port auth tak ditanam"
+grep -q 'FreeRADIUS-Client-Virtual-Server = "netovas_health_baru1"' "$F" \
+    && ok "create: client kesehatan diproses netovas_health_baru1 (bukan virtual server instance)" \
+    || fail "create: client kesehatan diproses virtual server lain"
+dyn="$(awk '/^server dynclients_baru1 \{/{a=1} a{print} a && /^\}$/{exit}' "$F")"
+grep -q '127.0.0.1' <<<"$dyn" && fail "create: dynclients_baru1 masih memuat cabang loopback lama" \
+    || ok "create: dynclients_baru1 tanpa cabang loopback"
 [ "$(secret_kesehatan_dari_config "$F")" = "$SEC" ] && ok "create: secret terbaca kembali dari config" \
     || fail "create: secret di config tidak terbaca kembali"
-grep -qE '^[^#]*ipaddr[[:space:]]*=[[:space:]]*127\.0\.0\.1' "$F" \
+grep -qE '^[^#]*ipaddr[[:space:]]*=[[:space:]]*127\.0\.0\.1([^/]|$)' "$F" \
     && fail "create: client STATIS 127.0.0.1 dipancarkan (duplikat dgn nas → FreeRADIUS tak start)" \
     || ok "create: tak ada client statis 127.0.0.1"
+
+buat_site sempit1 11030 "$SEC" "172.16.0.0/12"
+blok_kesehatan_lengkap "$SITES_AVAILABLE/sempit1" && grep -q "ipaddr          = 172.16.0.0/12" "$SITES_AVAILABLE/sempit1" \
+    && ok "create net sempit: NAS dinamis 172.16.0.0/12 + client kesehatan 127.0.0.0/8" \
+    || fail "create net sempit: kesehatan tak lengkap"
 
 buat_site mati1 11010 "$SEC" "off"
 F="$SITES_AVAILABLE/mati1"
@@ -146,8 +166,17 @@ restart_freeradius() {
 }
 radclient() {
     cat > /dev/null
-    local tujuan="$5" secret="$7"
-    if [ "$FR_AKTIF" = 0 ] && [ "$NAS_LOKAL" = 0 ] && grep -qxF "$secret" "$LOADED"; then
+    echo "radclient $*" >> "$TMP/argv.log"
+    local secret="" tujuan=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -S) secret=$(cat "$2"); shift 2 ;;
+            -r|-t) shift 2 ;;
+            -*) shift ;;
+            *) [ -z "$tujuan" ] && tujuan=$1; shift ;;
+        esac
+    done
+    if [ "$FR_AKTIF" = 0 ] && [ "$NAS_LOKAL" = 0 ] && [ -n "$secret" ] && grep -qxF "$secret" "$LOADED"; then
         echo "Received Access-Reject Id 1 from ${tujuan} to 127.0.0.1:5555 length 20"
     else
         echo "(0) No reply from server for ID 1 socket 3"
@@ -158,7 +187,7 @@ systemctl() {
     case "$1" in is-active) return "$FR_AKTIF" ;; esac
     return 0
 }
-curl() { echo 200; }
+curl() { echo "curl $*" >> "$TMP/argv.log"; cat > /dev/null; echo 200; }
 mysql_cmd() { echo "$NAS_LOKAL"; }
 
 siapkan_lama() { # siapkan_lama <nama> <port> — instance lama: dynclients tanpa blok kesehatan
@@ -188,7 +217,7 @@ grep -q "^RADIUS_HEALTH" "$ENV1" && fail "4a: .env ditulis padahal FreeRADIUS be
 
 # 4b. ulang tanpa --restart: idempoten.
 rc=$(jalankan lama1)
-[ "$(grep -c '# >>> netovas-health' "$SITES_AVAILABLE/lama1")" = 1 ] \
+blok_kesehatan_lengkap "$SITES_AVAILABLE/lama1" \
     && [ "$(secret_kesehatan_dari_config "$SITES_AVAILABLE/lama1")" = "$S1" ] \
     && ok "4b: diulang → tetap satu blok, secret sama" || fail "4b: tidak idempoten"
 
@@ -253,6 +282,22 @@ mkdir -p "$API_DIR_BASE/py1-api/venv"
 cp "$SITES_AVAILABLE/py1" "$TMP/py1.asli"
 rc=$(jalankan py1)
 cmp -s "$TMP/py1.asli" "$SITES_AVAILABLE/py1" && ok "4i: instance Python lama tak disentuh" || fail "4i: instance Python diubah"
+
+# 4j. blok TIDAK LENGKAP (bentuk lama / suntingan tangan) → galat, tak disentuh.
+siapkan_lama sisa1 12060
+printf '        # >>> netovas-health\n        # <<< netovas-health\n' >> "$SITES_AVAILABLE/sisa1"
+cp "$SITES_AVAILABLE/sisa1" "$TMP/sisa1.asli"
+rc=$(jalankan sisa1)
+cmp -s "$TMP/sisa1.asli" "$SITES_AVAILABLE/sisa1" && [ "$rc" != 0 ] && grep -q "TIDAK LENGKAP" "$TMP/keluaran" \
+    && ok "4j: blok tak lengkap → galat, config tak disentuh" || fail "4j: rc=$rc: $(cat "$TMP/keluaran")"
+
+# 4k. secret & sandi API TIDAK pernah jadi argumen proses (terlihat di `ps`).
+if grep -qF "$S1" "$TMP/argv.log" || grep -q -- " -u " "$TMP/argv.log"; then
+    fail "4k: secret/sandi muncul di argumen radclient/curl: $(grep -F -e "$S1" -e ' -u ' "$TMP/argv.log" | head -2)"
+else
+    ok "4k: secret kesehatan & sandi API tak pernah jadi argumen proses"
+fi
+grep -q -- "-S " "$TMP/argv.log" && ok "4k: radclient memakai -S <berkas>" || fail "4k: radclient tak memakai -S"
 
 # -- 5. cabang create menulis secret yang SAMA ke config & .env ----------------
 grep -q 'create_virtual_server "$ADMIN_USERNAME" "$AUTH_PORT" "$HEALTH_SECRET"' "$SCRIPT" \

@@ -304,22 +304,36 @@ Di mesin radius-manager, tiap instance mendapat:
 
 - `.env` API: `RADIUS_HEALTH_ADDR=127.0.0.1:<port auth instance>` +
   `RADIUS_HEALTH_SECRET=<acak>`;
-- di `sites-available/<nama>`, cabang pertama virtual server
-  `dynclients_<nama>` (di antara penanda `# >>> netovas-health` /
-  `# <<< netovas-health`): paket dari 127.0.0.1 → client dinamis dengan secret
-  yang sama, diproses virtual server instance itu.
+- di `sites-available/<nama>` (penanda `netovas-health-client` dan
+  `netovas-health`):
+  - client jaringan **dinamis** `127.0.0.0/8` di daftar per-socket
+    `dynclist_<nama>`;
+  - virtual server `dynhealth_<nama>` yang membuat client itu **hanya** untuk
+    paket dari 127.0.0.1 ke port auth;
+  - virtual server `netovas_health_<nama>` yang memprosesnya: menanyai
+    `sql_<nama>` (bukti DB terbaca) lalu **selalu menolak**. Tak ada pap/chap
+    (secret ini tak bisa dipakai menebak sandi), tak ada post-auth
+    (`radpostauth` tak ditulis), accounting/CoA dari client ini ditolak (tak bisa
+    menyuntik Accounting-Start/Stop).
 
-Kenapa client **dinamis**, bukan `client { ipaddr = 127.0.0.1 }` statis
+Kenapa `127.0.0.0/8` **dinamis**, bukan `client { ipaddr = 127.0.0.1 }` statis
 (teruji di freeradius-server 3.2.10): di daftar global, 127.0.0.1 instance kedua
 menduplikasi milik instance pertama; di daftar per-socket `dynclist_<nama>`,
 satu baris `nas` ber-nasname 127.0.0.1 menduplikasinya. Dua-duanya membuat
 FreeRADIUS **menolak start** ("Failed to add duplicate client") — seluruh mesin
-mati. Client dinamis tak pernah bertabrakan; paling buruk baris `nas` itu yang
-menang dan pemeriksaan menjawab 503 (mencegah pindah, tidak mematikan mesin).
+mati. Prefiks `/8` tak pernah bertabrakan dengan `/32`; paling buruk baris `nas`
+itu yang menang dan pemeriksaan menjawab 503 (mencegah pindah, tidak mematikan
+mesin). Karena prefiksnya sendiri dan lebih spesifik, pemeriksaan bekerja apa
+pun lebar `RM_API_DYNAMIC_CLIENT_NET` (net sempit seperti `172.16.0.0/12` dulu
+tak memuat 127.0.0.1 → instance sehat terbaca "mati").
 
-Syaratnya NAS dinamis aktif (`RM_API_DYNAMIC_CLIENT_NET`, bawaan `0.0.0.0/0`).
-Instance yang dibuat dengan NAS dinamis **mati** tidak mendapat client
-kesehatan (API menjawab 501).
+Syaratnya NAS dinamis aktif (`RM_API_DYNAMIC_CLIENT_NET`, bawaan `0.0.0.0/0`;
+bukan persis `127.0.0.0/8`). Instance yang dibuat dengan NAS dinamis **mati**
+tidak mendapat client kesehatan (API menjawab 501 → ERP meminta konfirmasi
+manual operator sebelum mengalihkan router).
+
+Secret tak pernah menjadi argumen proses: `radclient -S <berkas>` dan
+`curl -K -` (bukan `-u`), jadi tak terlihat di `ps`.
 
 **Instance BARU** (lewat ERP/RM-API maupun `radius-manager.sh create`) langsung
 mendapatkannya — tak ada langkah tambahan.

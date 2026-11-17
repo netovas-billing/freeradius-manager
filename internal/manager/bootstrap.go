@@ -323,7 +323,7 @@ func renderBlokKesehatanEnv(p SetupInstanceParams) (string, error) {
 # Pemeriksaan kesehatan FreeRADIUS (GET /api/v1/radius/health). API mengirim
 # Access-Request sengaja-salah ke port auth instance ini lewat loopback; jawaban
 # apa pun = FreeRADIUS hidup. ERP memakainya SEBELUM memindahkan router ke
-# server ini. Secret yang SAMA ditanam di virtual server dynclients_%s
+# server ini. Secret yang SAMA ditanam di virtual server dynhealth_%s
 # (sites-available/%s) — ubah keduanya bersamaan atau jangan sama sekali.
 RADIUS_HEALTH_ADDR=%s
 RADIUS_HEALTH_SECRET=%s

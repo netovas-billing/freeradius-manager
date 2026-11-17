@@ -9,6 +9,8 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	stdnet "net"
+	"strings"
 	"text/template"
 )
 
@@ -73,10 +75,12 @@ type Vars struct {
 	// client di sini berarti FreeRADIUS membuang paketnya dan endpoint
 	// menjawab 503 seolah FreeRADIUS mati.
 	//
-	// Bentuknya client DINAMIS 127.0.0.1 di virtual server dynclients_<nama>,
-	// jadi HANYA dipancarkan bila DynamicClientNet terisi. Bukan client
-	// statis, karena dua-duanya mematikan seluruh mesin (FreeRADIUS menolak
-	// start, "Failed to add duplicate client"):
+	// Bentuknya client jaringan DINAMIS 127.0.0.0/8 di daftar per-socket
+	// dynclist_<nama> (dibuat virtual server dynhealth_<nama>, diproses
+	// netovas_health_<nama> yang SELALU menolak), jadi HANYA dipancarkan bila
+	// DynamicClientNet terisi — pemanggil memakai KesehatanDidukung. Bukan
+	// client statis 127.0.0.1, karena dua-duanya mematikan seluruh mesin
+	// (FreeRADIUS menolak start, "Failed to add duplicate client"):
 	//   - di daftar GLOBAL, client 127.0.0.1 instance kedua menduplikasi milik
 	//     instance pertama (satu daemon memuat semua instance);
 	//   - di daftar per-socket dynclist, baris `nas` ber-nasname 127.0.0.1
@@ -104,10 +108,28 @@ func HealthSecretValid(s string) bool {
 	return true
 }
 
+// KesehatanDidukung — client kesehatan bisa dipasang untuk instance dengan
+// jaringan NAS dinamis net: butuh daftar client per-socket (net terisi), dan
+// net BUKAN persis 127.0.0.0/8 — prefiks itu dipakai client kesehatan, dua
+// client berprefiks sama = "Failed to add duplicate client" = FreeRADIUS tak
+// start dan SEMUA instance di mesin mati. Lebar net selain itu tak berpengaruh:
+// 127.0.0.0/8 lebih spesifik dari 0.0.0.0/0 maupun net sempit yang tak
+// memuat loopback (dulu net sempit membuat instance sehat terbaca "mati").
+func KesehatanDidukung(net string) bool {
+	net = strings.TrimSpace(net)
+	if net == "" {
+		return false
+	}
+	if _, n, err := stdnet.ParseCIDR(net); err == nil && n.String() == "127.0.0.0/8" {
+		return false
+	}
+	return true
+}
+
 // AlamatKesehatan — nilai RADIUS_HEALTH_ADDR untuk instance di mesin ini:
 // freeradius-api berjalan di host yang SAMA dengan FreeRADIUS-nya, jadi ia
 // menyapa port auth instance itu lewat loopback. Sumber paketnya 127.0.0.1 —
-// itulah yang dicocokkan cabang kesehatan di virtual server dynclients_<nama>.
+// itulah yang dicocokkan virtual server dynhealth_<nama>.
 func AlamatKesehatan(authPort int) string {
 	return fmt.Sprintf("127.0.0.1:%d", authPort)
 }

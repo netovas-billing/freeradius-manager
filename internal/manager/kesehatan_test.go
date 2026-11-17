@@ -115,6 +115,41 @@ func TestCreate_NASDinamisMati_TanpaKesehatan(t *testing.T) {
 	}
 }
 
+// MGR-1 (tinjauan 17 Nov 2026): RM_API_DYNAMIC_CLIENT_NET sempit (tak memuat
+// 127.0.0.1) dulu tetap menulis secret ke .env, padahal paket loopback tak
+// pernah memicu client dinamis → 503 palsu → ERP memblokir instance sehat.
+// Kini client kesehatan berprefiks 127.0.0.0/8 sendiri, jadi net sempit
+// tetap mendapat pemeriksaan yang BEKERJA; net persis 127.0.0.0/8 (prefiks
+// bentrok = duplicate client = mesin mati) → tanpa kesehatan (501).
+func TestCreate_NetSempit_KesehatanTetapBekerja(t *testing.T) {
+	for _, kasus := range []struct {
+		net       string
+		kesehatan bool
+	}{
+		{"172.16.0.0/12", true},
+		{"172.31.199.0/24", true},
+		{"127.0.0.0/8", false},
+	} {
+		t.Run(kasus.net, func(t *testing.T) {
+			i, _, _, fs, mock, cleanup := newCreateTestImpl(t)
+			defer cleanup()
+			i.cfg.DynamicClientNet = kasus.net
+			expectCreateDB(mock)
+			if _, err := i.CreateInstance(context.Background(), createReq("mitra_x")); err != nil {
+				t.Fatalf("CreateInstance: %v", err)
+			}
+			env := string(fs.Files[filepath.Join(i.cfg.APIDirBase, "mitra_x-api", ".env")])
+			site := berkasBerakhiran(t, fs.Files, "/sites-available/mitra_x")
+			_, adaEnv := barisEnv(env, "RADIUS_HEALTH_SECRET")
+			adaClient := strings.Contains(site, "client dynhealth_mitra_x {")
+			if adaEnv != kasus.kesehatan || adaClient != kasus.kesehatan {
+				t.Fatalf("net %s: secret di .env=%v, client 127.0.0.0/8 di config=%v; mau keduanya %v",
+					kasus.net, adaEnv, adaClient, kasus.kesehatan)
+			}
+		})
+	}
+}
+
 // Penjaga kelas bug insiden 17 Nov (setup.sh freeradius-api menulis mati
 // login/radius_db "radius" sementara .env memakai DB lain → FreeRADIUS
 // "Access denied ... to database 'radius'"): user, sandi, dan nama DB yang

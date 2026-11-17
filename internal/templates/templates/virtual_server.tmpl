@@ -35,6 +35,28 @@ clients dynclist_{{ .InstanceName }} {
         dynamic_clients = dynclients_{{ .InstanceName }}
         lifetime        = 600
     }
+{{- if .HealthSecret }}
+    # >>> netovas-health-client
+    # Jaringan pemeriksa kesehatan (GET /api/v1/radius/health milik
+    # freeradius-api instance ini, di mesin yang sama). LEBIH SPESIFIK dari
+    # jaringan NAS di atas, jadi paket dari loopback selalu mendarat di sini
+    # apa pun RM_API_DYNAMIC_CLIENT_NET-nya (net sempit seperti 172.16.0.0/12
+    # tak memuat 127.0.0.1 — dulu cabang kesehatan tak pernah terpicu dan
+    # instance sehat terbaca "mati").
+    #
+    # Prefiks /8, BUKAN client statis 127.0.0.1/32: client SQL masuk daftar
+    # yang sama, dan baris `nas` ber-nasname 127.0.0.1 (wajar dibuat teknisi
+    # untuk radtest) menduplikasi /32 → "Failed to add duplicate client" →
+    # FreeRADIUS tak start → SEMUA instance di mesin ini mati (teruji
+    # freeradius-server 3.2.10). /8 tak pernah bertabrakan dengan /32; paling
+    # buruk baris `nas` itu yang menang dan pemeriksaan menjawab gagal.
+    client dynhealth_{{ .InstanceName }} {
+        ipaddr          = 127.0.0.0/8
+        dynamic_clients = dynhealth_{{ .InstanceName }}
+        lifetime        = 600
+    }
+    # <<< netovas-health-client
+{{- end }}
 }
 
 {{ end }}
@@ -212,37 +234,6 @@ server {{ .InstanceName }} {
 # ============================================================================
 server dynclients_{{ .InstanceName }} {
     authorize {
-{{- if .HealthSecret }}
-        # >>> netovas-health
-        # Client pemeriksaan kesehatan (GET /api/v1/radius/health milik
-        # freeradius-api instance ini, di mesin yang sama): Access-Request
-        # sengaja-salah dari 127.0.0.1 ke port auth; jawaban APA PUN
-        # membuktikan FreeRADIUS hidup dan modul SQL-nya termuat. ERP memakainya
-        # sebelum memindahkan router ke server ini. Secret yang sama ada di
-        # RADIUS_HEALTH_SECRET pada .env API instance.
-        #
-        # SENGAJA client DINAMIS, bukan `client { ipaddr = 127.0.0.1 }` statis
-        # di daftar dynclist: client SQL masuk ke daftar yang sama, dan satu
-        # baris `nas` ber-nasname 127.0.0.1/localhost (wajar dibuat teknisi
-        # untuk radtest) menjadi DUPLIKAT client statis itu — FreeRADIUS
-        # menolak start ("Failed to add duplicate client") dan SEMUA instance
-        # di mesin ini mati (teruji di freeradius-server 3.2.10). Client dinamis
-        # tak pernah bertabrakan; paling buruk baris `nas` itu yang menang dan
-        # pemeriksaan kesehatan menjawab gagal — mencegah pindah, bukan
-        # mematikan mesin. Hanya terjangkau dari mesin ini sendiri (loopback).
-        if (&Packet-Src-IP-Address == 127.0.0.1) {
-            update control {
-                &FreeRADIUS-Client-IP-Address     = 127.0.0.1
-                &FreeRADIUS-Client-Shortname      = "netovas_health"
-                &FreeRADIUS-Client-Secret         = "{{ .HealthSecret }}"
-                &FreeRADIUS-Client-NAS-Type       = "other"
-                &FreeRADIUS-Client-Virtual-Server = "{{ .InstanceName }}"
-            }
-            ok
-            return
-        }
-        # <<< netovas-health
-{{- end }}
         if ("%{sql_{{ .InstanceName }}: SELECT nasname FROM nas WHERE nasname = '%{Packet-Src-IP-Address}'}") {
             update control {
                 &FreeRADIUS-Client-IP-Address     = "%{Packet-Src-IP-Address}"
@@ -258,4 +249,74 @@ server dynclients_{{ .InstanceName }} {
         }
     }
 }
+{{- if .HealthSecret }}
+
+# >>> netovas-health
+# ============================================================================
+# Pemeriksaan kesehatan FreeRADIUS instance ini (GET /api/v1/radius/health
+# freeradius-api, RADIUS_HEALTH_ADDR=127.0.0.1:{{ .AuthPort }}). ERP memakainya
+# SEBELUM memindahkan router ke server ini — insiden 17 Nov 2026: ERP hanya
+# memeriksa API (sehat) lalu mengalihkan router ke FreeRADIUS yang MATI.
+#
+# dynhealth_<nama> hanya MEMBUAT client: sumber 127.0.0.1, ke port AUTH. Client
+# itu diproses netovas_health_<nama>, BUKAN virtual server instance:
+#   - authorize hanya menanyai sql_<nama> (bukti modul termuat DAN DB terbaca)
+#     lalu SELALU reject — tak ada pap/chap, jadi secret ini tak bisa dipakai
+#     menebak sandi pelanggan;
+#   - tak ada post-auth → radpostauth tidak ditulis;
+#   - client dinamis berlaku di ketiga socket (auth/acct/coa berbagi daftar),
+#     tetapi accounting/CoA dari client ini ditolak di sini — tak bisa
+#     menyuntik Accounting-Start/Stop (Simultaneous-Use, kuota).
+# Secret yang sama ada di RADIUS_HEALTH_SECRET pada .env API instance.
+# ============================================================================
+server dynhealth_{{ .InstanceName }} {
+    authorize {
+        if ((&Packet-Src-IP-Address == 127.0.0.1) && (&Packet-Dst-Port == {{ .AuthPort }})) {
+            update control {
+                &FreeRADIUS-Client-IP-Address     = 127.0.0.1
+                &FreeRADIUS-Client-Require-MA     = yes
+                &FreeRADIUS-Client-Shortname      = "netovas_health"
+                &FreeRADIUS-Client-Secret         = "{{ .HealthSecret }}"
+                &FreeRADIUS-Client-NAS-Type       = "other"
+                &FreeRADIUS-Client-Virtual-Server = "netovas_health_{{ .InstanceName }}"
+            }
+            ok
+        }
+        else {
+            reject
+        }
+    }
+}
+
+server netovas_health_{{ .InstanceName }} {
+    authorize {
+        # Kueri sungguhan ke DB; `fail = 1` supaya kegagalan bisa ditandai
+        # (freeradius-api membaca Reply-Message ini sebagai 503).
+        sql_{{ .InstanceName }} {
+            fail = 1
+        }
+        if (fail) {
+            update reply {
+                &Reply-Message := "netovas-health: sql gagal"
+            }
+        }
+        reject
+    }
+    authenticate {
+    }
+    preacct {
+        reject
+    }
+    accounting {
+        reject
+    }
+    recv-coa {
+        reject
+    }
+    send-coa {
+        ok
+    }
+}
+# <<< netovas-health
+{{- end }}
 {{- end }}
